@@ -13,8 +13,11 @@ categories = ["command-line-utilities", "compression"]
 exclude = ["/.github", "/bench"]
 
 [dependencies]
+anyhow = "1.0.104"
+walkdir = "2.5.0"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 
 [lints.rust]
 unsafe_code = "forbid"

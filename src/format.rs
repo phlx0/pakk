@@ -105,7 +105,10 @@ mod tests {
         assert_eq!(Format::from_magic(b"PK\x03\x04rest"), Some(Format::Zip));
         assert_eq!(Format::from_magic(b"PK\x05\x06"), Some(Format::Zip));
         assert_eq!(Format::from_magic(&[0x1f, 0x8b, 8]), Some(Format::TarGz));
-        assert_eq!(Format::from_magic(&[0x28, 0xb5, 0x2f, 0xfd]), Some(Format::TarZst));
+        assert_eq!(
+            Format::from_magic(&[0x28, 0xb5, 0x2f, 0xfd]),
+            Some(Format::TarZst)
+        );
         let mut tar = vec![0u8; 512];
         tar[257..262].copy_from_slice(b"ustar");
         assert_eq!(Format::from_magic(&tar), Some(Format::Tar));
@@ -115,8 +118,17 @@ mod tests {
 
     #[test]
     fn strips_archive_suffix() {
-        assert_eq!(Format::stem(Path::new("x/site.tar.gz")).as_deref(), Some("site"));
-        assert_eq!(Format::stem(Path::new("Photos.ZIP")).as_deref(), Some("Photos"));
-        assert_eq!(Format::stem(Path::new("notes.txt")).as_deref(), Some("notes.txt"));
+        assert_eq!(
+            Format::stem(Path::new("x/site.tar.gz")).as_deref(),
+            Some("site")
+        );
+        assert_eq!(
+            Format::stem(Path::new("Photos.ZIP")).as_deref(),
+            Some("Photos")
+        );
+        assert_eq!(
+            Format::stem(Path::new("notes.txt")).as_deref(),
+            Some("notes.txt")
+        );
     }
 }
