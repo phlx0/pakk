@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io::{self, Read};
+use std::ops::RangeInclusive;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
@@ -60,6 +62,24 @@ impl Format {
     }
 
     #[must_use]
+    pub const fn levels(self) -> RangeInclusive<u32> {
+        match self {
+            Self::Zip | Self::TarGz => 0..=9,
+            Self::TarZst => 1..=22,
+            Self::Tar => 0..=0,
+        }
+    }
+
+    #[must_use]
+    pub const fn default_level(self) -> u32 {
+        match self {
+            Self::Zip | Self::TarGz => 6,
+            Self::TarZst => 3,
+            Self::Tar => 0,
+        }
+    }
+
+    #[must_use]
     pub fn stem(path: &Path) -> Option<String> {
         let name = path.file_name()?.to_string_lossy().into_owned();
         let lower = name.to_ascii_lowercase();
@@ -74,6 +94,22 @@ impl Format {
 impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.extension())
+    }
+}
+
+impl FromStr for Format {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim_start_matches('.').to_ascii_lowercase().as_str() {
+            "zip" => Ok(Self::Zip),
+            "tar" => Ok(Self::Tar),
+            "tar.gz" | "tgz" | "gz" | "gzip" => Ok(Self::TarGz),
+            "tar.zst" | "tzst" | "zst" | "zstd" => Ok(Self::TarZst),
+            _ => Err(format!(
+                "unknown format `{s}` (expected zip, tar, tar.gz or tar.zst)"
+            )),
+        }
     }
 }
 
@@ -114,6 +150,24 @@ mod tests {
         assert_eq!(Format::from_magic(&tar), Some(Format::Tar));
         assert_eq!(Format::from_magic(b"hello"), None);
         assert_eq!(Format::from_magic(b""), None);
+    }
+
+    #[test]
+    fn parses_format_names() {
+        assert_eq!("zip".parse(), Ok(Format::Zip));
+        assert_eq!(".TGZ".parse(), Ok(Format::TarGz));
+        assert_eq!("zstd".parse(), Ok(Format::TarZst));
+        assert!("rar".parse::<Format>().is_err());
+    }
+
+    #[test]
+    fn default_level_is_in_range() {
+        for format in [Format::Zip, Format::Tar, Format::TarGz, Format::TarZst] {
+            assert!(
+                format.levels().contains(&format.default_level()),
+                "{format}"
+            );
+        }
     }
 
     #[test]
