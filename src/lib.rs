@@ -1,6 +1,7 @@
 pub mod format;
 pub mod fsutil;
 pub mod listing;
+pub mod ops;
 pub mod pgzip;
 pub mod progress;
 pub mod tarball;
