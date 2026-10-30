@@ -60,8 +60,7 @@ fn finish_file(out: BufWriter<File>) -> std::io::Result<()> {
     let mut file = out
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
-    file.flush()?;
-    file.sync_all()
+    file.flush()
 }
 
 pub fn detect(archive: &Path) -> Result<Format> {
