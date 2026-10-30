@@ -1,6 +1,10 @@
-use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +16,8 @@ use crate::listing::Listing;
 use crate::pgzip::{self, ParGzWriter};
 use crate::progress::{Progress, Summary};
 use crate::walk::{Entry, Kind};
+
+const INLINE_LIMIT: u64 = 8 << 20;
 
 enum Encoder<W: Write> {
     Plain(W),
@@ -123,42 +129,205 @@ fn open(
     Ok(tar::Archive::new(decoder))
 }
 
+struct Job {
+    path: PathBuf,
+    data: Vec<u8>,
+    meta: Meta,
+}
+
+#[derive(Clone, Copy)]
+struct Meta {
+    mode: Option<u32>,
+    mtime: Option<SystemTime>,
+}
+
+enum Deferred {
+    Symlink(PathBuf, PathBuf, Meta),
+    HardLink(PathBuf, PathBuf),
+}
+
 pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) -> Result<Summary> {
     let mut tar = open(archive, format, progress)?;
-    tar.set_preserve_permissions(true);
-    tar.set_preserve_mtime(true);
-    tar.set_overwrite(true);
+    let workers = rayon::current_num_threads().max(2);
+    let (tx, rx) = sync_channel::<Job>(workers * 4);
+    let rx = Mutex::new(rx);
+    let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
 
-    let mut summary = Summary::default();
-    let mut dir_times: Vec<(PathBuf, SystemTime)> = Vec::new();
-    for entry in tar.entries().context("cannot read archive")? {
-        let mut entry = entry.context("corrupt archive")?;
-        let path = entry.path()?.into_owned();
-        let kind = entry.header().entry_type();
-        if !entry
-            .unpack_in(dest)
-            .with_context(|| format!("cannot extract {}", path.display()))?
-        {
-            bail!("refusing to extract unsafe path `{}`", path.display());
-        }
-        match kind {
-            EntryType::Directory => {
-                summary.dirs += 1;
-                if let Ok(mtime) = entry.header().mtime() {
-                    dir_times.push((dest.join(&path), from_unix(mtime)));
+    let read = thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                while let Ok(job) = rx.lock().map_err(drop).and_then(|r| r.recv().map_err(drop)) {
+                    if let Err(err) = write_job(&job) {
+                        failure.lock().expect("lock").get_or_insert(err);
+                    }
                 }
-            }
-            EntryType::Symlink | EntryType::Link => summary.symlinks += 1,
-            _ => {
-                summary.files += 1;
-                summary.bytes += entry.size();
-            }
+            });
         }
+        let read = read_entries(&mut tar, dest, &tx, &failure);
+        drop(tx);
+        read
+    });
+
+    if let Some(err) = failure.into_inner().expect("lock") {
+        return Err(err);
     }
-    for (dir, mtime) in dir_times.iter().rev() {
-        let _ = fsutil::set_mtime(dir, *mtime);
+    let (summary, dirs, mut deferred) = read?;
+    deferred.sort_by_key(|item| matches!(item, Deferred::Symlink(..)));
+    for item in deferred {
+        create_link(item)?;
+    }
+    for (dir, meta) in dirs.iter().rev() {
+        restore(dir, meta)?;
     }
     Ok(summary)
+}
+
+type ReadResult = (Summary, Vec<(PathBuf, Meta)>, Vec<Deferred>);
+
+fn read_entries<R: Read>(
+    tar: &mut tar::Archive<R>,
+    dest: &Path,
+    tx: &SyncSender<Job>,
+    failure: &Mutex<Option<anyhow::Error>>,
+) -> Result<ReadResult> {
+    let mut summary = Summary::default();
+    let mut dirs = Vec::new();
+    let mut deferred = Vec::new();
+    let mut created = HashSet::new();
+
+    for entry in tar.entries().context("cannot read archive")? {
+        if failure.lock().expect("lock").is_some() {
+            break;
+        }
+        let mut entry = entry.context("corrupt archive")?;
+        let raw = entry.path()?.into_owned();
+        let rel = safe_path(&raw)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let path = dest.join(&rel);
+        let header = entry.header();
+        let meta = Meta {
+            mode: header.mode().ok(),
+            mtime: header.mtime().ok().map(from_unix),
+        };
+
+        match header.entry_type() {
+            EntryType::Directory => {
+                ensure_dir(&path, &mut created)?;
+                dirs.push((path, meta));
+                summary.dirs += 1;
+            }
+            EntryType::Symlink => {
+                let target = entry.link_name()?.unwrap_or_default().into_owned();
+                ensure_parent(&path, &mut created)?;
+                deferred.push(Deferred::Symlink(path, target, meta));
+                summary.symlinks += 1;
+            }
+            EntryType::Link => {
+                let target = entry.link_name()?.unwrap_or_default();
+                let target = dest.join(safe_path(&target)?);
+                ensure_parent(&path, &mut created)?;
+                deferred.push(Deferred::HardLink(path, target));
+                summary.files += 1;
+            }
+            EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => {
+                ensure_parent(&path, &mut created)?;
+                let size = entry.size();
+                summary.files += 1;
+                summary.bytes += size;
+                if size > INLINE_LIMIT {
+                    let out = fsutil::create_file(&path)
+                        .with_context(|| format!("cannot create {}", path.display()))?;
+                    io::copy(&mut entry, &mut BufWriter::with_capacity(1 << 20, out))
+                        .with_context(|| format!("cannot extract {}", rel.display()))?;
+                    restore(&path, &meta)?;
+                } else {
+                    let mut data = Vec::with_capacity(size as usize);
+                    entry.read_to_end(&mut data).context("corrupt archive")?;
+                    if tx.send(Job { path, data, meta }).is_err() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((summary, dirs, deferred))
+}
+
+fn safe_path(raw: &Path) -> Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for part in raw.components() {
+        match part {
+            Component::Normal(p) => out.push(p),
+            Component::CurDir => {}
+            _ => bail!("refusing to extract unsafe path `{}`", raw.display()),
+        }
+    }
+    Ok(out)
+}
+
+fn ensure_parent(path: &Path, created: &mut HashSet<PathBuf>) -> Result<()> {
+    match path.parent() {
+        Some(parent) => ensure_dir(parent, created),
+        None => Ok(()),
+    }
+}
+
+fn ensure_dir(dir: &Path, created: &mut HashSet<PathBuf>) -> Result<()> {
+    if !created.contains(dir) {
+        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        created.insert(dir.to_path_buf());
+    }
+    Ok(())
+}
+
+fn write_job(job: &Job) -> Result<()> {
+    let mut out = fsutil::create_file(&job.path)
+        .with_context(|| format!("cannot create {}", job.path.display()))?;
+    out.write_all(&job.data)
+        .with_context(|| format!("cannot write {}", job.path.display()))?;
+    drop(out);
+    restore(&job.path, &job.meta)
+}
+
+fn create_link(item: Deferred) -> Result<()> {
+    match item {
+        Deferred::Symlink(path, target, meta) => {
+            if fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path)?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &path)
+                .with_context(|| format!("cannot create symlink {}", path.display()))?;
+            #[cfg(not(unix))]
+            fs::write(&path, target.to_string_lossy().as_bytes())?;
+            if let Some(mtime) = meta.mtime {
+                let _ = fsutil::set_mtime(&path, mtime);
+            }
+        }
+        Deferred::HardLink(path, target) => {
+            if fs::symlink_metadata(&path).is_ok() {
+                fs::remove_file(&path)?;
+            }
+            fs::hard_link(&target, &path)
+                .with_context(|| format!("cannot create hard link {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn restore(path: &Path, meta: &Meta) -> Result<()> {
+    if let Some(mode) = meta.mode {
+        fsutil::set_mode(path, mode)
+            .with_context(|| format!("cannot set permissions on {}", path.display()))?;
+    }
+    if let Some(mtime) = meta.mtime {
+        fsutil::set_mtime(path, mtime)
+            .with_context(|| format!("cannot set mtime on {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn list(archive: &Path, format: Format) -> Result<Vec<Listing>> {
