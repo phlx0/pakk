@@ -259,7 +259,7 @@ fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
                 String::from_utf8_lossy(file.name_raw())
             )
         })?;
-        if path.as_os_str().is_empty() {
+        if path.as_os_str().is_empty() || fsutil::is_macos_metadata(&path) {
             continue;
         }
         let planned = Planned {

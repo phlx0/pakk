@@ -202,7 +202,7 @@ fn read_entries<R: Read>(
         let mut entry = entry.context("corrupt archive")?;
         let raw = entry.path()?.into_owned();
         let rel = safe_path(&raw)?;
-        if rel.as_os_str().is_empty() {
+        if rel.as_os_str().is_empty() || fsutil::is_macos_metadata(&rel) {
             continue;
         }
         let path = dest.join(&rel);

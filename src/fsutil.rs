@@ -31,6 +31,14 @@ pub fn persist(tmp: NamedTempFile, out: &Path) -> Result<()> {
         .with_context(|| format!("cannot write {}", out.display()))
 }
 
+#[must_use]
+pub fn is_macos_metadata(path: &Path) -> bool {
+    path.components().any(|c| {
+        let part = c.as_os_str().to_string_lossy();
+        part == "__MACOSX" || part.starts_with("._")
+    })
+}
+
 pub fn create_file(path: &Path) -> io::Result<File> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(path)?;
@@ -143,6 +151,14 @@ mod tests {
         persist(tmp, &out).unwrap();
         assert_eq!(fs::read(&out).unwrap(), b"data");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn recognises_macos_metadata() {
+        assert!(is_macos_metadata(Path::new("__MACOSX/a/._b")));
+        assert!(is_macos_metadata(Path::new("dir/._file.txt")));
+        assert!(!is_macos_metadata(Path::new("dir/.file")));
+        assert!(!is_macos_metadata(Path::new("MACOSX/file")));
     }
 
     #[cfg(unix)]
