@@ -264,3 +264,23 @@ fn refuses_to_pack_a_file_onto_itself() {
         .stderr(predicate::str::contains("both an input and the output"));
     assert_eq!(fs::read(&notes).unwrap(), before);
 }
+
+#[cfg(unix)]
+#[test]
+fn warns_about_special_files_instead_of_hanging() {
+    let ws = workspace();
+    let fifo = ws.path().join("project/pipe");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    pakk(ws.path())
+        .args(["pack", "project"])
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipped").and(predicate::str::contains("pipe")));
+}

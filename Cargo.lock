@@ -578,6 +578,7 @@ dependencies = [
  "flate2",
  "indicatif",
  "jiff",
+ "libc",
  "predicates",
  "rayon",
  "tar",

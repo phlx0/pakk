@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -103,8 +103,8 @@ fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item
 }
 
 fn compress(entry: &Entry, options: SimpleFileOptions) -> Result<PreparedZipFile> {
-    let mut file =
-        File::open(&entry.path).with_context(|| format!("cannot open {}", entry.path.display()))?;
+    let mut file = fsutil::open_regular(&entry.path)
+        .with_context(|| format!("cannot open {}", entry.path.display()))?;
     let mut builder = ZipFileBuilder::new(&entry.name, options)?;
     io::copy(&mut file, &mut builder)
         .with_context(|| format!("cannot read {}", entry.path.display()))?;
@@ -126,7 +126,7 @@ fn write_items<W: Write + Seek>(
             }
             Item::Stream(entry, options) => {
                 zip.start_file(&entry.name, options)?;
-                let file = File::open(&entry.path)
+                let file = fsutil::open_regular(&entry.path)
                     .with_context(|| format!("cannot open {}", entry.path.display()))?;
                 summary.files += 1;
                 summary.bytes += io::copy(&mut progress.wrap_read(file), &mut zip)
@@ -334,6 +334,7 @@ fn from_dos_time(time: zip::DateTime) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Cursor;
 
     fn fixture() -> tempfile::TempDir {
@@ -357,7 +358,7 @@ mod tests {
     }
 
     fn pack_to_vec(dir: &Path) -> Vec<u8> {
-        let entries = walk::collect(&[dir.join("src")], None).unwrap();
+        let entries = walk::collect(&[dir.join("src")], None).unwrap().entries;
         let (cursor, summary) =
             pack(&entries, Cursor::new(Vec::new()), 6, &Progress::hidden()).unwrap();
         assert_eq!(summary.files, 4);

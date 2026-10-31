@@ -20,7 +20,13 @@ pub struct PackOptions {
     pub progress: bool,
 }
 
-pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Summary> {
+#[derive(Debug)]
+pub struct Packed {
+    pub summary: Summary,
+    pub skipped: Vec<PathBuf>,
+}
+
+pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Packed> {
     let level = opts.level.unwrap_or(opts.format.default_level());
     let levels = opts.format.levels();
     if !levels.contains(&level) {
@@ -45,7 +51,7 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Sum
             }
         }
     }
-    let entries = walk::collect(inputs, Some(output))?;
+    let walk::Collected { entries, skipped } = walk::collect(inputs, Some(output))?;
     if entries.is_empty() {
         bail!("nothing to pack");
     }
@@ -63,7 +69,7 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Sum
     finish_file(out).with_context(|| format!("cannot write {}", output.display()))?;
     progress.finish();
     fsutil::persist(tmp, output)?;
-    Ok(summary)
+    Ok(Packed { summary, skipped })
 }
 
 fn finish_file(out: BufWriter<File>) -> std::io::Result<()> {

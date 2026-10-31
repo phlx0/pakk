@@ -32,10 +32,17 @@ impl Entry {
     }
 }
 
-pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Vec<Entry>> {
+#[derive(Debug, Default)]
+pub struct Collected {
+    pub entries: Vec<Entry>,
+    pub skipped: Vec<PathBuf>,
+}
+
+pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Collected> {
     let exclude = exclude.and_then(|p| fs::canonicalize(p).ok());
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
+    let mut skipped = Vec::new();
 
     for input in inputs {
         fs::symlink_metadata(input).with_context(|| format!("cannot read {}", input.display()))?;
@@ -60,14 +67,17 @@ pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Vec<Entry>>
             let meta = item
                 .metadata()
                 .with_context(|| format!("cannot stat {}", item.path().display()))?;
-            let entry = make_entry(item.path(), archive_name(&name_path), &meta)?;
+            let Some(entry) = make_entry(item.path(), archive_name(&name_path), &meta)? else {
+                skipped.push(item.path().to_path_buf());
+                continue;
+            };
             if !seen.insert(entry.name.clone()) {
                 bail!("duplicate archive path `{}`", entry.name);
             }
             entries.push(entry);
         }
     }
-    Ok(entries)
+    Ok(Collected { entries, skipped })
 }
 
 #[must_use]
@@ -113,7 +123,7 @@ fn archive_name(path: &Path) -> String {
         .join("/")
 }
 
-fn make_entry(path: &Path, name: String, meta: &Metadata) -> Result<Entry> {
+fn make_entry(path: &Path, name: String, meta: &Metadata) -> Result<Option<Entry>> {
     let file_type = meta.file_type();
     let kind = if file_type.is_symlink() {
         let target =
@@ -121,16 +131,18 @@ fn make_entry(path: &Path, name: String, meta: &Metadata) -> Result<Entry> {
         Kind::Symlink { target }
     } else if file_type.is_dir() {
         Kind::Dir
-    } else {
+    } else if file_type.is_file() {
         Kind::File { size: meta.len() }
+    } else {
+        return Ok(None);
     };
-    Ok(Entry {
+    Ok(Some(Entry {
         path: path.to_path_buf(),
         mode: mode(meta),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         name,
         kind,
-    })
+    }))
 }
 
 #[cfg(unix)]
@@ -170,7 +182,7 @@ mod tests {
     #[test]
     fn walks_directory_sorted_with_prefix() {
         let dir = tree();
-        let entries = collect(&[dir.path().join("proj")], None).unwrap();
+        let entries = collect(&[dir.path().join("proj")], None).unwrap().entries;
         assert_eq!(
             names(&entries),
             [
@@ -189,7 +201,9 @@ mod tests {
     #[test]
     fn dot_input_has_no_prefix() {
         let dir = tree();
-        let entries = collect(&[dir.path().join("proj/src/.")], None).unwrap();
+        let entries = collect(&[dir.path().join("proj/src/.")], None)
+            .unwrap()
+            .entries;
         assert_eq!(names(&entries), ["a.rs", "b.rs", "deep", "deep/c.rs"]);
     }
 
@@ -197,7 +211,9 @@ mod tests {
     fn excludes_output_file() {
         let dir = tree();
         let out = dir.path().join("proj/README");
-        let entries = collect(&[dir.path().join("proj")], Some(&out)).unwrap();
+        let entries = collect(&[dir.path().join("proj")], Some(&out))
+            .unwrap()
+            .entries;
         assert!(!names(&entries).contains(&"proj/README"));
     }
 
@@ -233,10 +249,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn skips_special_files() {
+        let dir = tree();
+        let fifo = dir.path().join("proj/pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let collected = collect(&[dir.path().join("proj")], None).unwrap();
+        assert_eq!(collected.skipped, [fifo]);
+        assert!(!names(&collected.entries).contains(&"proj/pipe"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn records_symlinks_without_following() {
         let dir = tree();
         std::os::unix::fs::symlink("README", dir.path().join("proj/link")).unwrap();
-        let entries = collect(&[dir.path().join("proj")], None).unwrap();
+        let entries = collect(&[dir.path().join("proj")], None).unwrap().entries;
         let link = entries.iter().find(|e| e.name == "proj/link").unwrap();
         assert_eq!(
             link.kind,

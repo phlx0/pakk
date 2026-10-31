@@ -57,7 +57,14 @@ fn pack(args: &PackArgs, progress: bool, quiet: bool) -> Result<()> {
         force: args.force,
         progress,
     };
-    let summary = ops::pack(&args.inputs, &output, &opts)?;
+    let ops::Packed { summary, skipped } = ops::pack(&args.inputs, &output, &opts)?;
+    for path in &skipped {
+        eprintln!(
+            "{} skipped {} (not a regular file, directory or symlink)",
+            style("warning:").yellow().bold(),
+            path.display()
+        );
+    }
 
     if !quiet {
         let size = std::fs::metadata(&output).map_or(0, |m| m.len());

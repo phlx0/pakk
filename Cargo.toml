@@ -51,3 +51,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"

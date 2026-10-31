@@ -110,7 +110,7 @@ fn load(entry: &Entry) -> Result<Loaded<'_>> {
     match entry.kind {
         Kind::File { size } if size <= INLINE_LIMIT => {
             let context = || format!("cannot read {}", entry.path.display());
-            let mut file = File::open(&entry.path).with_context(context)?;
+            let mut file = fsutil::open_regular(&entry.path).with_context(context)?;
             let meta = file.metadata().with_context(context)?;
             let mut data = Vec::with_capacity(meta.len() as usize);
             file.read_to_end(&mut data).with_context(context)?;
@@ -145,7 +145,7 @@ fn write_tar<W: Write + Send + 'static>(
             }
             Loaded::Stream(entry) => {
                 let context = || format!("cannot add {}", entry.path.display());
-                let file = File::open(&entry.path).with_context(context)?;
+                let file = fsutil::open_regular(&entry.path).with_context(context)?;
                 let meta = file.metadata().with_context(context)?;
                 let mut header = Header::new_gnu();
                 header.set_metadata_in_mode(&meta, HeaderMode::Complete);
@@ -441,7 +441,9 @@ mod tests {
 
     fn roundtrip(format: Format, level: u32) {
         let dir = fixture();
-        let entries = walk::collect(&[dir.path().join("site")], None).unwrap();
+        let entries = walk::collect(&[dir.path().join("site")], None)
+            .unwrap()
+            .entries;
         let archive = dir.path().join(format!("out.{format}"));
         let file = File::create(&archive).unwrap();
         let (_, packed) = pack(&entries, file, format, level, 4, &Progress::hidden()).unwrap();

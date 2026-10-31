@@ -39,6 +39,24 @@ pub fn is_macos_metadata(path: &Path) -> bool {
     })
 }
 
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no longer a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 pub fn create_file(path: &Path) -> io::Result<File> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(path)?;
@@ -151,6 +169,29 @@ mod tests {
         persist(tmp, &out).unwrap();
         assert_eq!(fs::read(&out).unwrap(), b"data");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_refuses_symlinks_and_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "x").unwrap();
+        assert!(open_regular(&file).is_ok());
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(open_regular(&link).is_err());
+
+        let fifo = dir.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(open_regular(&fifo).is_err());
     }
 
     #[test]
