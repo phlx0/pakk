@@ -2,11 +2,39 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use tempfile::NamedTempFile;
+
+static TRACKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+pub fn track(path: &Path) {
+    if let Ok(mut tracked) = TRACKED.lock() {
+        tracked.push(path.to_path_buf());
+    }
+}
+
+pub fn untrack(path: &Path) {
+    if let Ok(mut tracked) = TRACKED.lock() {
+        tracked.retain(|p| p != path);
+    }
+}
+
+pub fn remove_tracked() {
+    let paths = TRACKED
+        .lock()
+        .map(|mut t| std::mem::take(&mut *t))
+        .unwrap_or_default();
+    for path in paths {
+        let _ = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+    }
+}
 
 pub fn create_atomic(out: &Path) -> Result<NamedTempFile> {
     let dir = match out.parent() {
@@ -20,12 +48,15 @@ pub fn create_atomic(out: &Path) -> Result<NamedTempFile> {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(fs::Permissions::from_mode(0o666));
     }
-    builder
+    let tmp = builder
         .tempfile_in(dir)
-        .with_context(|| format!("cannot create a file in {}", dir.display()))
+        .with_context(|| format!("cannot create a file in {}", dir.display()))?;
+    track(tmp.path());
+    Ok(tmp)
 }
 
 pub fn persist(tmp: NamedTempFile, out: &Path) -> Result<()> {
+    untrack(tmp.path());
     tmp.persist(out)
         .map(drop)
         .map_err(|e| e.error)

@@ -111,6 +111,19 @@ fn unpack_here(archive: &Path, format: Format, progress: &Progress) -> Result<(P
         .prefix(".pakk-")
         .tempdir_in(here)
         .context("cannot create a staging directory here")?;
+    fsutil::track(staging.path());
+    let result = finish_staging(archive, &staging, format, progress);
+    fsutil::untrack(staging.path());
+    result
+}
+
+fn finish_staging(
+    archive: &Path,
+    staging: &tempfile::TempDir,
+    format: Format,
+    progress: &Progress,
+) -> Result<(PathBuf, Summary)> {
+    let here = Path::new(".");
     let summary = extract(archive, staging.path(), format, progress)?;
 
     let mut top = fs::read_dir(staging.path())?.collect::<std::io::Result<Vec<_>>>()?;
@@ -129,7 +142,6 @@ fn unpack_here(archive: &Path, format: Format, progress: &Progress) -> Result<(P
     }
     fs::rename(&from, &to).with_context(|| format!("cannot create {}", to.display()))?;
     if whole {
-        let _ = staging.keep();
         #[cfg(unix)]
         fsutil::set_mode(&to, 0o755)?;
     }

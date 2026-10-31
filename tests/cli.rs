@@ -360,3 +360,53 @@ fn last_duplicate_entry_wins() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn interrupt_removes_temporary_files() {
+    let ws = workspace();
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let noise: Vec<u8> = (0..(192 << 20))
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    fs::write(ws.path().join("project/noise.bin"), noise).unwrap();
+
+    let leftovers = || {
+        fs::read_dir(ws.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pakk-")
+            })
+            .count()
+    };
+    let bin = assert_cmd::cargo::cargo_bin("pakk");
+    let mut child = Command::new(bin)
+        .args([
+            "-q", "-j", "1", "pack", "project", "-o", "slow.zip", "-l", "9",
+        ])
+        .current_dir(ws.path())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while leftovers() == 0 && started.elapsed().as_secs() < 20 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(leftovers(), 1, "temp file should exist while packing");
+    Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(130));
+    assert_eq!(leftovers(), 0);
+    assert!(!ws.path().join("slow.zip").exists());
+}

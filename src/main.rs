@@ -19,6 +19,10 @@ use crate::cli::{Cli, Command, ListArgs, PackArgs, UnpackArgs};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let _ = ctrlc::set_handler(|| {
+        pakk::fsutil::remove_tracked();
+        std::process::exit(130);
+    });
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) if is_broken_pipe(&err) => ExitCode::SUCCESS,
