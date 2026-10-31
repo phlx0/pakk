@@ -463,3 +463,39 @@ for name, method in [("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA), (
         );
     }
 }
+
+#[test]
+fn decompresses_single_files() {
+    let ws = workspace();
+    let text = "line of a log file\n".repeat(10_000);
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, text.as_bytes()).unwrap();
+    fs::write(ws.path().join("app.log.gz"), gz.finish().unwrap()).unwrap();
+    fs::write(
+        ws.path().join("app2.log.zst"),
+        zstd::encode_all(text.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    pakk(ws.path())
+        .args(["unpack", "app.log.gz"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("into ./app.log"));
+    assert_eq!(fs::read_to_string(ws.path().join("app.log")).unwrap(), text);
+
+    pakk(ws.path())
+        .args(["unpack", "app2.log.zst", "-C", "out"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(ws.path().join("out/app2.log")).unwrap(),
+        text
+    );
+
+    pakk(ws.path())
+        .args(["list", "-l", "app.log.gz"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("app.log"));
+}

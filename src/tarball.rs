@@ -197,11 +197,14 @@ fn write_tar<W: Write + Send + 'static>(
     ))
 }
 
-fn open(
-    archive: &Path,
-    format: Format,
-    progress: &Progress,
-) -> Result<tar::Archive<Box<dyn Read + Send>>> {
+type Stream = Box<dyn Read + Send>;
+
+enum Opened {
+    Tar(tar::Archive<Stream>),
+    Single(Stream),
+}
+
+fn open(archive: &Path, format: Format, progress: &Progress) -> Result<Opened> {
     let file = File::open(archive).with_context(|| format!("cannot open {}", archive.display()))?;
     progress.set_total(file.metadata()?.len());
     let reader = BufReader::with_capacity(1 << 20, progress.wrap_read(file));
@@ -217,7 +220,77 @@ fn open(
         Format::TarBz2 => Box::new(bzip2::bufread::MultiBzDecoder::new(reader)),
         Format::Zip => bail!("zip is not a tar format"),
     };
-    Ok(tar::Archive::new(decoder))
+    if format == Format::Tar {
+        return Ok(Opened::Tar(tar::Archive::new(decoder)));
+    }
+    let mut decoder = decoder;
+    let mut head = Vec::with_capacity(512);
+    (&mut decoder)
+        .take(512)
+        .read_to_end(&mut head)
+        .with_context(|| format!("cannot decompress {}", archive.display()))?;
+    let is_tar = is_tar_header(&head);
+    let stream: Stream = Box::new(io::Cursor::new(head).chain(decoder));
+    Ok(if is_tar {
+        Opened::Tar(tar::Archive::new(stream))
+    } else {
+        Opened::Single(stream)
+    })
+}
+
+fn is_tar_header(block: &[u8]) -> bool {
+    if block.len() < 512 {
+        return block.is_empty();
+    }
+    if block.iter().all(|&b| b == 0) || &block[257..262] == b"ustar" {
+        return true;
+    }
+    let field = String::from_utf8_lossy(&block[148..156]);
+    let Ok(stored) = u32::from_str_radix(field.trim_matches(|c: char| c == '\0' || c == ' '), 8)
+    else {
+        return false;
+    };
+    let sum: u32 = block
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            if (148..156).contains(&i) {
+                32
+            } else {
+                u32::from(b)
+            }
+        })
+        .sum();
+    sum == stored
+}
+
+#[must_use]
+pub fn single_name(archive: &Path) -> String {
+    let name = archive
+        .file_name()
+        .map_or_else(|| "output".into(), |n| n.to_string_lossy().into_owned());
+    let lower = name.to_ascii_lowercase();
+    for suffix in [
+        ".gz", ".tgz", ".zst", ".tzst", ".xz", ".txz", ".bz2", ".tbz2", ".tbz",
+    ] {
+        if lower.len() > suffix.len() && lower.ends_with(suffix) {
+            return name[..name.len() - suffix.len()].to_owned();
+        }
+    }
+    format!("{name}.out")
+}
+
+fn unpack_single(archive: &Path, mut stream: Stream, dest: &Path) -> Result<Summary> {
+    let path = dest.join(single_name(archive));
+    let out =
+        fsutil::create_file(&path).with_context(|| format!("cannot create {}", path.display()))?;
+    let bytes = io::copy(&mut stream, &mut BufWriter::with_capacity(1 << 20, out))
+        .with_context(|| format!("cannot decompress {}", archive.display()))?;
+    Ok(Summary {
+        files: 1,
+        bytes,
+        ..Summary::default()
+    })
 }
 
 struct Job {
@@ -294,7 +367,10 @@ impl Links {
 }
 
 pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) -> Result<Summary> {
-    let mut tar = open(archive, format, progress)?;
+    let mut tar = match open(archive, format, progress)? {
+        Opened::Tar(tar) => tar,
+        Opened::Single(stream) => return unpack_single(archive, stream, dest),
+    };
     let workers = rayon::current_num_threads().max(2);
     let (tx, rx) = sync_channel::<Msg>(workers * 4);
     let rx = Mutex::new(rx);
@@ -485,7 +561,17 @@ fn restore(path: &Path, meta: &Meta) -> Result<()> {
 }
 
 pub fn list(archive: &Path, format: Format) -> Result<Vec<Listing>> {
-    let mut tar = open(archive, format, &Progress::hidden())?;
+    let mut tar = match open(archive, format, &Progress::hidden())? {
+        Opened::Tar(tar) => tar,
+        Opened::Single(mut stream) => {
+            let size = io::copy(&mut stream, &mut io::sink())?;
+            return Ok(vec![Listing {
+                name: single_name(archive),
+                kind: Kind::File { size },
+                mtime: None,
+            }]);
+        }
+    };
     let mut out = Vec::new();
     for entry in tar.entries().context("cannot read archive")? {
         let entry = entry.context("corrupt archive")?;
@@ -591,6 +677,25 @@ mod tests {
     #[test]
     fn roundtrips_tar_bz2() {
         roundtrip(Format::TarBz2, 9);
+    }
+
+    #[test]
+    fn recognises_tar_headers() {
+        let mut header = Header::new_old();
+        header.set_path("file.txt").unwrap();
+        header.set_size(0);
+        header.set_cksum();
+        assert!(is_tar_header(header.as_bytes()));
+        assert!(is_tar_header(&[0; 512]));
+        assert!(!is_tar_header(&[b'x'; 512]));
+        assert!(!is_tar_header(b"short text"));
+    }
+
+    #[test]
+    fn names_single_files() {
+        assert_eq!(single_name(Path::new("dir/app.log.gz")), "app.log");
+        assert_eq!(single_name(Path::new("dump.SQL.ZST")), "dump.SQL");
+        assert_eq!(single_name(Path::new("data.bin")), "data.bin.out");
     }
 
     #[test]
