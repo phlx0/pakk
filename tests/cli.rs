@@ -410,3 +410,36 @@ fn interrupt_removes_temporary_files() {
     assert_eq!(leftovers(), 0);
     assert!(!ws.path().join("slow.zip").exists());
 }
+
+#[test]
+fn extracts_every_common_zip_method() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let ws = workspace();
+    let script = r#"
+import zipfile
+for name, method in [("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA), ("deflate", zipfile.ZIP_DEFLATED)]:
+    with zipfile.ZipFile(f"{name}.zip", "w", method) as z:
+        z.writestr("data/hello.txt", "hello " * 1000)
+"#;
+    assert!(
+        Command::new("python3")
+            .args(["-c", script])
+            .current_dir(ws.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    for name in ["bzip2", "lzma", "deflate"] {
+        let dest = format!("out-{name}");
+        pakk(ws.path())
+            .args(["unpack", &format!("{name}.zip"), "-C", &dest])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::read_to_string(ws.path().join(dest).join("data/hello.txt")).unwrap(),
+            "hello ".repeat(1000)
+        );
+    }
+}
