@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tempfile::NamedTempFile;
 
 pub fn create_atomic(out: &Path) -> Result<NamedTempFile> {
@@ -86,6 +87,67 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_readonly(mode & 0o222 == 0);
     fs::set_permissions(path, perms)
+}
+
+#[derive(Debug)]
+pub struct Beneath {
+    root: PathBuf,
+    verified: HashSet<PathBuf>,
+}
+
+impl Beneath {
+    #[must_use]
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            verified: HashSet::new(),
+        }
+    }
+
+    pub fn create_parent(&mut self, rel: &Path) -> Result<()> {
+        match rel.parent() {
+            Some(parent) => self.create_dirs(parent),
+            None => Ok(()),
+        }
+    }
+
+    pub fn create_dirs(&mut self, rel: &Path) -> Result<()> {
+        let mut current = PathBuf::new();
+        for part in rel.components() {
+            current.push(part);
+            if self.verified.contains(&current) {
+                continue;
+            }
+            let full = self.root.join(&current);
+            match fs::symlink_metadata(&full) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    bail!(
+                        "refusing to extract through existing symlink {}",
+                        full.display()
+                    );
+                }
+                Ok(_) => {
+                    fs::remove_file(&full)
+                        .and_then(|()| fs::create_dir(&full))
+                        .with_context(|| {
+                            format!("cannot replace {} with a directory", full.display())
+                        })?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(&full) {
+                    Err(e) if !(e.kind() == io::ErrorKind::AlreadyExists && full.is_dir()) => {
+                        return Err(e).with_context(|| format!("cannot create {}", full.display()));
+                    }
+                    _ => {}
+                },
+                Err(e) => {
+                    return Err(e).with_context(|| format!("cannot inspect {}", full.display()));
+                }
+            }
+            self.verified.insert(current.clone());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +281,33 @@ mod tests {
         fs::set_permissions(&file, perms).unwrap();
         create_file(&file).unwrap().write_all(b"new").unwrap();
         assert_eq!(fs::read(&file).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn beneath_refuses_existing_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(dir.path().join("outside")).unwrap();
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink("../outside", root.join("lnk")).unwrap();
+
+        let mut beneath = Beneath::new(&root);
+        beneath.create_dirs(Path::new("a/b/c")).unwrap();
+        assert!(root.join("a/b/c").is_dir());
+        let err = beneath.create_parent(Path::new("lnk/x/file")).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!dir.path().join("outside/x").exists());
+    }
+
+    #[test]
+    fn beneath_replaces_files_with_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "file").unwrap();
+        Beneath::new(dir.path())
+            .create_dirs(Path::new("a/b"))
+            .unwrap();
+        assert!(dir.path().join("a/b").is_dir());
     }
 
     #[test]

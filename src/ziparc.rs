@@ -174,9 +174,9 @@ pub fn unpack(archive: &Path, dest: &Path, progress: &Progress) -> Result<Summar
     let plan = plan(&mut zip)?;
     progress.set_total(plan.bytes);
 
+    let mut beneath = fsutil::Beneath::new(dest);
     for dir in &plan.parents {
-        let dir = dest.join(dir);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        beneath.create_dirs(dir)?;
     }
     plan.files.par_iter().try_for_each_init(
         || zip.clone(),

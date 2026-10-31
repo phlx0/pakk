@@ -306,3 +306,27 @@ fn reextracts_over_read_only_files() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn never_extracts_through_existing_symlinks() {
+    let ws = workspace();
+    pakk(ws.path())
+        .args(["pack", "project", "-f", "tar.gz"])
+        .assert()
+        .success();
+    pakk(ws.path()).args(["pack", "project"]).assert().success();
+    fs::create_dir_all(ws.path().join("outside")).unwrap();
+    for archive in ["project.zip", "project.tar.gz"] {
+        let dest = ws.path().join(format!("dest-{archive}"));
+        fs::create_dir(&dest).unwrap();
+        std::os::unix::fs::symlink("../outside", dest.join("project")).unwrap();
+        pakk(ws.path())
+            .args(["unpack", archive, "-C"])
+            .arg(&dest)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("existing symlink"));
+    }
+    assert_eq!(fs::read_dir(ws.path().join("outside")).unwrap().count(), 0);
+}

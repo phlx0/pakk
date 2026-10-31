@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -252,7 +251,7 @@ fn read_entries<R: Read>(
     let mut summary = Summary::default();
     let mut dirs = Vec::new();
     let mut deferred = Vec::new();
-    let mut created = HashSet::new();
+    let mut beneath = fsutil::Beneath::new(dest);
 
     for entry in tar.entries().context("cannot read archive")? {
         if failure.lock().expect("lock").is_some() {
@@ -273,25 +272,26 @@ fn read_entries<R: Read>(
 
         match header.entry_type() {
             EntryType::Directory => {
-                ensure_dir(&path, &mut created)?;
+                beneath.create_dirs(&rel)?;
                 dirs.push((path, meta));
                 summary.dirs += 1;
             }
             EntryType::Symlink => {
                 let target = entry.link_name()?.unwrap_or_default().into_owned();
-                ensure_parent(&path, &mut created)?;
+                beneath.create_parent(&rel)?;
                 deferred.push(Deferred::Symlink(path, target, meta));
                 summary.symlinks += 1;
             }
             EntryType::Link => {
-                let target = entry.link_name()?.unwrap_or_default();
-                let target = dest.join(safe_path(&target)?);
-                ensure_parent(&path, &mut created)?;
+                let target = safe_path(&entry.link_name()?.unwrap_or_default())?;
+                beneath.create_parent(&target)?;
+                let target = dest.join(target);
+                beneath.create_parent(&rel)?;
                 deferred.push(Deferred::HardLink(path, target));
                 summary.files += 1;
             }
             EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => {
-                ensure_parent(&path, &mut created)?;
+                beneath.create_parent(&rel)?;
                 let size = entry.size();
                 summary.files += 1;
                 summary.bytes += size;
@@ -327,21 +327,6 @@ fn safe_path(raw: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
-fn ensure_parent(path: &Path, created: &mut HashSet<PathBuf>) -> Result<()> {
-    match path.parent() {
-        Some(parent) => ensure_dir(parent, created),
-        None => Ok(()),
-    }
-}
-
-fn ensure_dir(dir: &Path, created: &mut HashSet<PathBuf>) -> Result<()> {
-    if !created.contains(dir) {
-        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-        created.insert(dir.to_path_buf());
-    }
-    Ok(())
-}
-
 fn write_job(job: &Job) -> Result<()> {
     let mut out = fsutil::create_file(&job.path)
         .with_context(|| format!("cannot create {}", job.path.display()))?;
@@ -367,6 +352,12 @@ fn create_link(item: Deferred) -> Result<()> {
             }
         }
         Deferred::HardLink(path, target) => {
+            if fs::symlink_metadata(&target).is_ok_and(|m| !m.is_file()) {
+                bail!(
+                    "refusing hard link {} to a non-regular file",
+                    path.display()
+                );
+            }
             if fs::symlink_metadata(&path).is_ok() {
                 fs::remove_file(&path)?;
             }
