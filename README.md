@@ -6,26 +6,28 @@
 `pakk` uses all of them, and its output is plain old zip and gzip that every other tool already reads.
 
 ```console
-$ pakk pack photos/
-✓ packed 4,812 files (3.1 GiB) into photos.zip (2.9 GiB, 94%) in 1.42s
+$ pakk pack rustdocs
+✓ packed 51,996 files (637.20 MiB) into rustdocs.zip (146.30 MiB, 23%) in 1.99s
 
-$ pakk unpack release.tar.gz
-✓ unpacked 52,013 files (789 MiB) into ./release in 2.32s
+$ pakk unpack rustdocs.tar.gz
+✓ unpacked 51,996 files (637.20 MiB) into ./rustdocs in 2.00s
 ```
 
 ## Benchmarks
 
-The Rust documentation (789 MiB, 52,000 files of HTML, JS and images) on an Apple M4 (10 cores), warm cache:
+The Rust documentation (637 MiB in 51,996 files of HTML, JS and images) on an Apple M4 with 10 cores.
+Each figure is the median of 3 runs:
 
 | Task | Classic tool | pakk | Speedup |
 |---|---:|---:|---:|
-| Create `.zip` | `zip -r` 7.89 s | **1.84 s** | **4.3×** |
-| Create `.tar.gz` | `tar czf` 21.21 s | **1.28 s** | **16.6×** |
-| Create `.tar.zst` | `tar \| zstd -T0` 16.25 s | **1.11 s** | **14.6×** |
-| Extract `.zip` | `unzip` 8.71 s | **2.41 s** | **3.6×** |
-| Extract `.tar.gz` | `tar xzf` 4.45 s | **2.32 s** | **1.9×** |
+| Create `.zip` | `zip -r` 9.21 s | **1.79 s** | **5.1×** |
+| Create `.tar.gz` | `tar czf` 23.77 s | **1.54 s** | **15.4×** |
+| Create `.tar.zst` | `tar \| zstd -T0` 17.93 s | **1.21 s** | **14.8×** |
+| Extract `.zip` | `unzip` 8.53 s | **2.23 s** | **3.8×** |
+| Extract `.tar.gz` | `tar xzf` 4.63 s | **2.10 s** | **2.2×** |
+| Extract `.tar.zst` | `zstd -dc \| tar x` 4.42 s | **2.01 s** | **2.2×** |
 
-Archive sizes are equal or smaller: zip 153 MiB vs 161 MiB, tar.gz 80 MiB vs 80 MiB, tar.zst 51 MiB vs 55 MiB.
+The archives come out the same size or smaller: zip 146 vs 148 MiB, tar.gz 74 vs 80 MiB, tar.zst 51 vs 54 MiB.
 
 > [!NOTE]
 > On macOS the system `tar` is bsdtar, which is slow at walking many small files, so part of the
@@ -79,9 +81,10 @@ also records its own compressed size in a gzip extra field (`PZ`), which other t
 pakk reads a `.tar.gz` it made, that field lets it find block boundaries without decompressing,
 so it decompresses in parallel too. Any other `.tar.gz` falls back to normal sequential decoding.
 
-**tar: parallel writes.** The tar stream is read sequentially, but file contents are handed to a
-pool of writer threads, because creating thousands of small files is a syscall-bound job that
-parallelizes well.
+**tar: parallel reads and writes.** A tar stream is sequential, but the file system around it doesn't
+have to be. When packing, pakk prefetches input files in parallel batches, so the SSD sees many
+requests at once rather than one at a time. When extracting, file contents are handed to a pool of
+writer threads, because creating thousands of small files is syscall-bound work that parallelizes well.
 
 **zstd** uses its native multithreaded compressor.
 
@@ -89,7 +92,7 @@ parallelizes well.
 
 - **No tarbombs.** `pakk unpack x.zip` extracts into `./x/`, unless the archive already has a
   single top-level folder, in which case that folder is used. Files never spill into your
-  current directory, and pakk never silently merges into an existing directory.
+  current directory, and without `-C` pakk never merges into an existing directory.
 - **No zip-slip.** Entries with `..`, absolute paths or drive prefixes are rejected. Symlinks are
   created only after all regular files are written, so an archive can't plant a link and then
   write through it.
@@ -100,7 +103,7 @@ parallelizes well.
   carry checksums.
 - **macOS clutter is skipped.** `__MACOSX/` folders and AppleDouble `._*` files are left out
   when extracting.
-- **No `unsafe` code** in pakk itself (`#![forbid(unsafe_code)]`).
+- **No `unsafe` code** in pakk itself (`unsafe_code = "forbid"`).
 
 ## Formats
 
@@ -109,7 +112,7 @@ parallelizes well.
 | `.zip` | ✓ | ✓ | ✓ | ✓ |
 | `.tar.gz` / `.tgz` | ✓ | ✓ | ✓ | ✓ for pakk-made archives, writes for all |
 | `.tar.zst` / `.tzst` | ✓ | ✓ | ✓ | writes |
-| `.tar` | ✓ | ✓ | n/a | writes |
+| `.tar` | ✓ | ✓ | reads | writes |
 
 When extracting, the format is detected from the file contents, not the name.
 
