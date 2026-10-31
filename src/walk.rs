@@ -71,6 +71,23 @@ pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Vec<Entry>>
 }
 
 #[must_use]
+pub fn batches(entries: &[Entry], max_bytes: u64, max_len: usize, cap: u64) -> Vec<&[Entry]> {
+    let mut out = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, entry) in entries.iter().enumerate() {
+        bytes += entry.size().min(cap);
+        if bytes >= max_bytes || i + 1 - start >= max_len {
+            out.push(&entries[start..=i]);
+            (start, bytes) = (i + 1, 0);
+        }
+    }
+    if start < entries.len() {
+        out.push(&entries[start..]);
+    }
+    out
+}
+
+#[must_use]
 pub fn total_size(entries: &[Entry]) -> u64 {
     entries.iter().map(Entry::size).sum()
 }
@@ -190,6 +207,23 @@ mod tests {
         let input = dir.path().join("proj/README");
         let err = collect(&[input.clone(), input], None).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn batches_respect_limits() {
+        let entry = |size| Entry {
+            path: PathBuf::new(),
+            name: String::new(),
+            kind: Kind::File { size },
+            mode: 0o644,
+            mtime: SystemTime::UNIX_EPOCH,
+        };
+        let entries: Vec<_> = (0..10).map(|_| entry(25)).collect();
+        let sizes = |b: Vec<&[Entry]>| b.iter().map(|b| b.len()).collect::<Vec<_>>();
+        assert_eq!(sizes(batches(&entries, 100, 99, u64::MAX)), [4, 4, 2]);
+        assert_eq!(sizes(batches(&entries, 100, 3, u64::MAX)), [3, 3, 3, 1]);
+        assert_eq!(sizes(batches(&entries, 100, 99, 10)), [10]);
+        assert!(batches(&[], 100, 99, 10).is_empty());
     }
 
     #[test]

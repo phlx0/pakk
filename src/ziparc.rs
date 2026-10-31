@@ -14,7 +14,7 @@ use zip::{CompressionMethod, PreparedZipFile, ZipArchive, ZipWriter};
 use crate::fsutil::{self, SharedFile};
 use crate::listing::Listing;
 use crate::progress::{Progress, Summary};
-use crate::walk::{Entry, Kind};
+use crate::walk::{self, Entry, Kind};
 
 const BATCH_BYTES: u64 = 64 << 20;
 const BATCH_ENTRIES: usize = 4096;
@@ -55,7 +55,7 @@ fn produce<'a>(
     progress: &Progress,
     tx: &SyncSender<Vec<Item<'a>>>,
 ) -> Result<()> {
-    for batch in batches(entries) {
+    for batch in walk::batches(entries, BATCH_BYTES, BATCH_ENTRIES, STREAM_THRESHOLD) {
         let items = batch
             .par_iter()
             .map(|entry| prepare(entry, level, progress))
@@ -65,22 +65,6 @@ fn produce<'a>(
         }
     }
     Ok(())
-}
-
-fn batches(entries: &[Entry]) -> Vec<&[Entry]> {
-    let mut out = Vec::new();
-    let (mut start, mut bytes) = (0, 0);
-    for (i, entry) in entries.iter().enumerate() {
-        bytes += entry.size().min(STREAM_THRESHOLD);
-        if bytes >= BATCH_BYTES || i + 1 - start >= BATCH_ENTRIES {
-            out.push(&entries[start..=i]);
-            (start, bytes) = (i + 1, 0);
-        }
-    }
-    if start < entries.len() {
-        out.push(&entries[start..]);
-    }
-    out
 }
 
 fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item<'a>> {
@@ -350,7 +334,6 @@ fn from_dos_time(time: zip::DateTime) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::walk;
     use std::io::Cursor;
 
     fn fixture() -> tempfile::TempDir {
@@ -454,20 +437,5 @@ mod tests {
         let err = unpack(&archive, &dest, &Progress::hidden()).unwrap_err();
         assert!(err.to_string().contains("unsafe path"), "{err}");
         assert!(!dir.path().join("escape.txt").exists());
-    }
-
-    #[test]
-    fn batches_respect_limits() {
-        let entry = |size| Entry {
-            path: PathBuf::new(),
-            name: String::new(),
-            kind: Kind::File { size },
-            mode: 0o644,
-            mtime: SystemTime::UNIX_EPOCH,
-        };
-        let entries: Vec<_> = (0..10).map(|_| entry(BATCH_BYTES / 4)).collect();
-        let sizes: Vec<_> = batches(&entries).iter().map(|b| b.len()).collect();
-        assert_eq!(sizes, [4, 4, 2]);
-        assert!(batches(&[]).is_empty());
     }
 }
