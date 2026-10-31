@@ -8,7 +8,8 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
-use zip::write::{SimpleFileOptions, ZipFileBuilder};
+use zip::extra_fields::ExtraField;
+use zip::write::{FullFileOptions, ZipFileBuilder};
 use zip::{CompressionMethod, PreparedZipFile, ZipArchive, ZipWriter};
 
 use crate::fsutil::{self, SharedFile};
@@ -25,11 +26,15 @@ const PRECOMPRESSED: &[&str] = &[
     "pptx", "rar", "tgz", "webm", "webp", "whl", "woff", "woff2", "xlsx", "xz", "zip", "zst",
 ];
 
+const EXTENDED_TIMESTAMP: u16 = 0x5455;
+
+type Options = FullFileOptions<'static, 'static>;
+
 enum Item<'a> {
     Prepared(PreparedZipFile),
-    Stream(&'a Entry, SimpleFileOptions),
-    Dir(&'a str, SimpleFileOptions),
-    Symlink(&'a str, String, SimpleFileOptions),
+    Stream(&'a Entry, Options),
+    Dir(&'a str, Options),
+    Symlink(&'a str, String, Options),
 }
 
 pub fn pack<W: Write + Seek + Send>(
@@ -68,9 +73,7 @@ fn produce<'a>(
 }
 
 fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item<'a>> {
-    let base = SimpleFileOptions::default()
-        .last_modified_time(to_dos_time(entry.mtime))
-        .unix_permissions(entry.mode);
+    let base = base_options(entry)?;
     let size = match &entry.kind {
         Kind::Dir => return Ok(Item::Dir(&entry.name, base)),
         Kind::Symlink { target } => {
@@ -82,10 +85,11 @@ fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item
 
     let deflate = level > 0 && !is_precompressed(&entry.name);
     let options = if deflate {
-        base.compression_method(CompressionMethod::Deflated)
+        base.clone()
+            .compression_method(CompressionMethod::Deflated)
             .compression_level(Some(i64::from(level)))
     } else {
-        base.compression_method(CompressionMethod::Stored)
+        base.clone().compression_method(CompressionMethod::Stored)
     };
     if size >= STREAM_THRESHOLD {
         return Ok(Item::Stream(
@@ -94,7 +98,7 @@ fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item
         ));
     }
 
-    let mut prepared = compress(entry, options)?;
+    let mut prepared = compress(entry, options.clone())?;
     if deflate && prepared.compressed_size() >= prepared.uncompressed_size() {
         prepared = compress(entry, base.compression_method(CompressionMethod::Stored))?;
     }
@@ -102,7 +106,24 @@ fn prepare<'a>(entry: &'a Entry, level: u32, progress: &Progress) -> Result<Item
     Ok(Item::Prepared(prepared))
 }
 
-fn compress(entry: &Entry, options: SimpleFileOptions) -> Result<PreparedZipFile> {
+fn base_options(entry: &Entry) -> Result<Options> {
+    let mut options = Options::default()
+        .last_modified_time(to_dos_time(entry.mtime))
+        .unix_permissions(entry.mode);
+    let secs = entry
+        .mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u32::try_from(d.as_secs()).ok());
+    if let Some(secs) = secs {
+        let mut field = vec![1];
+        field.extend_from_slice(&secs.to_le_bytes());
+        options.add_extra_field(EXTENDED_TIMESTAMP, field, false)?;
+    }
+    Ok(options)
+}
+
+fn compress(entry: &Entry, options: Options) -> Result<PreparedZipFile> {
     let mut file = fsutil::open_regular(&entry.path)
         .with_context(|| format!("cannot open {}", entry.path.display()))?;
     let mut builder = ZipFileBuilder::new(&entry.name, options)?;
@@ -214,7 +235,7 @@ pub fn list(archive: &Path) -> Result<Vec<Listing>> {
             Ok(Listing {
                 name: file.name()?.trim_end_matches('/').to_owned(),
                 kind,
-                mtime: file.last_modified().and_then(from_dos_time),
+                mtime: modified(&file),
             })
         })
         .collect()
@@ -251,7 +272,7 @@ fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
         let planned = Planned {
             index,
             mode: file.unix_mode(),
-            mtime: file.last_modified().and_then(from_dos_time),
+            mtime: modified(&file),
             path,
         };
         if file.is_dir() {
@@ -323,6 +344,17 @@ fn restore_metadata(path: &Path, item: &Planned) -> Result<()> {
             .with_context(|| format!("cannot set mtime on {}", path.display()))?;
     }
     Ok(())
+}
+
+fn modified<R: io::Read>(file: &zip::read::ZipFile<'_, R>) -> Option<SystemTime> {
+    let utc = file.extra_data_fields().find_map(|field| match field {
+        ExtraField::ExtendedTimestamp(ts) => ts.mod_time(),
+        _ => None,
+    });
+    match utc {
+        Some(secs) => Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs.into())),
+        None => file.last_modified().and_then(from_dos_time),
+    }
 }
 
 fn to_dos_time(time: SystemTime) -> zip::DateTime {
@@ -432,11 +464,29 @@ mod tests {
     }
 
     #[test]
+    fn keeps_exact_utc_mtime() {
+        let dir = fixture();
+        let file = dir.path().join("src/text.txt");
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_710_505_837);
+        fsutil::set_mtime(&file, mtime).unwrap();
+        let archive = dir.path().join("t.zip");
+        fs::write(&archive, pack_to_vec(dir.path())).unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        unpack(&archive, &dest, &Progress::hidden()).unwrap();
+        let restored = fs::metadata(dest.join("src/text.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(restored, mtime);
+    }
+
+    #[test]
     fn rejects_path_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("evil.zip");
         let mut zip = ZipWriter::new(File::create(&archive).unwrap());
-        zip.start_file("../escape.txt", SimpleFileOptions::default())
+        zip.start_file("../escape.txt", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(b"pwned").unwrap();
         zip.finish().unwrap();
