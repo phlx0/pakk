@@ -58,10 +58,13 @@ pub fn open_regular(path: &Path) -> io::Result<File> {
 }
 
 pub fn create_file(path: &Path) -> io::Result<File> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
         fs::remove_file(path)?;
     }
-    File::create(path)
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 pub fn set_mtime(path: &Path, mtime: SystemTime) -> io::Result<()> {
@@ -192,6 +195,30 @@ mod tests {
                 .success()
         );
         assert!(open_regular(&fifo).is_err());
+    }
+
+    #[test]
+    fn create_file_never_writes_through_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let link = dir.path().join("link");
+        fs::hard_link(&victim, &link).unwrap();
+        create_file(&link).unwrap().write_all(b"new").unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(fs::read(&link).unwrap(), b"new");
+    }
+
+    #[test]
+    fn create_file_replaces_read_only_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ro");
+        fs::write(&file, "old").unwrap();
+        let mut perms = fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&file, perms).unwrap();
+        create_file(&file).unwrap().write_all(b"new").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"new");
     }
 
     #[test]

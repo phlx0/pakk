@@ -284,3 +284,25 @@ fn warns_about_special_files_instead_of_hanging() {
         .success()
         .stderr(predicate::str::contains("skipped").and(predicate::str::contains("pipe")));
 }
+
+#[cfg(unix)]
+#[test]
+fn reextracts_over_read_only_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = workspace();
+    let ro = ws.path().join("project/src/main.rs");
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o444)).unwrap();
+    for format in ["zip", "tar.gz"] {
+        pakk(ws.path())
+            .args(["pack", "project", "-f", format, "--force"])
+            .assert()
+            .success();
+        let archive = format!("project.{format}");
+        for _ in 0..2 {
+            pakk(ws.path())
+                .args(["unpack", &archive, "-C", "again"])
+                .assert()
+                .success();
+        }
+    }
+}
