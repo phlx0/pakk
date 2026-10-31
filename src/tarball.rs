@@ -3,11 +3,12 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use rayon::prelude::*;
 use tar::{EntryType, Header, HeaderMode};
 
 use crate::format::Format;
@@ -15,9 +16,11 @@ use crate::fsutil;
 use crate::listing::Listing;
 use crate::pgzip::{self, ParGzWriter};
 use crate::progress::{Progress, Summary};
-use crate::walk::{Entry, Kind};
+use crate::walk::{self, Entry, Kind};
 
 const INLINE_LIMIT: u64 = 8 << 20;
+const PREFETCH_BYTES: u64 = 64 << 20;
+const PREFETCH_ENTRIES: usize = 4096;
 
 enum Encoder<W: Write> {
     Plain(W),
@@ -67,6 +70,12 @@ impl<W: Write + Send + 'static> Write for Encoder<W> {
     }
 }
 
+enum Loaded<'a> {
+    Data(&'a Entry, fs::Metadata, Vec<u8>),
+    Stream(&'a Entry),
+    Path(&'a Entry),
+}
+
 pub fn pack<W: Write + Send + 'static>(
     entries: &[Entry],
     out: W,
@@ -75,15 +84,67 @@ pub fn pack<W: Write + Send + 'static>(
     threads: usize,
     progress: &Progress,
 ) -> Result<(W, Summary)> {
-    let mut tar = tar::Builder::new(Encoder::new(out, format, level, threads)?);
+    let encoder = Encoder::new(out, format, level, threads)?;
+    let (tx, rx) = sync_channel(1);
+    thread::scope(|s| {
+        let writer = s.spawn(move || write_tar(encoder, &rx, progress));
+        let loaded = prefetch(entries, &tx);
+        drop(tx);
+        let written = writer.join().map_err(|_| anyhow!("tar writer panicked"))?;
+        loaded?;
+        written
+    })
+}
+
+fn prefetch<'a>(entries: &'a [Entry], tx: &SyncSender<Vec<Loaded<'a>>>) -> Result<()> {
+    for batch in walk::batches(entries, PREFETCH_BYTES, PREFETCH_ENTRIES, INLINE_LIMIT) {
+        let loaded = batch.par_iter().map(load).collect::<Result<Vec<_>>>()?;
+        if tx.send(loaded).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn load(entry: &Entry) -> Result<Loaded<'_>> {
+    match entry.kind {
+        Kind::File { size } if size <= INLINE_LIMIT => {
+            let context = || format!("cannot read {}", entry.path.display());
+            let mut file = File::open(&entry.path).with_context(context)?;
+            let meta = file.metadata().with_context(context)?;
+            let mut data = Vec::with_capacity(meta.len() as usize);
+            file.read_to_end(&mut data).with_context(context)?;
+            Ok(Loaded::Data(entry, meta, data))
+        }
+        Kind::File { .. } => Ok(Loaded::Stream(entry)),
+        Kind::Dir | Kind::Symlink { .. } => Ok(Loaded::Path(entry)),
+    }
+}
+
+fn write_tar<W: Write + Send + 'static>(
+    encoder: Encoder<W>,
+    rx: &Receiver<Vec<Loaded<'_>>>,
+    progress: &Progress,
+) -> Result<(W, Summary)> {
+    let mut tar = tar::Builder::new(encoder);
     tar.mode(HeaderMode::Complete);
     tar.follow_symlinks(false);
 
     let mut summary = Summary::default();
-    for entry in entries {
-        let context = || format!("cannot add {}", entry.path.display());
-        match entry.kind {
-            Kind::File { .. } => {
+    for item in rx.iter().flatten() {
+        match item {
+            Loaded::Data(entry, meta, data) => {
+                let mut header = Header::new_gnu();
+                header.set_metadata_in_mode(&meta, HeaderMode::Complete);
+                header.set_size(data.len() as u64);
+                tar.append_data(&mut header, &entry.name, data.as_slice())
+                    .with_context(|| format!("cannot add {}", entry.path.display()))?;
+                progress.inc(data.len() as u64);
+                summary.files += 1;
+                summary.bytes += data.len() as u64;
+            }
+            Loaded::Stream(entry) => {
+                let context = || format!("cannot add {}", entry.path.display());
                 let file = File::open(&entry.path).with_context(context)?;
                 let meta = file.metadata().with_context(context)?;
                 let mut header = Header::new_gnu();
@@ -93,15 +154,13 @@ pub fn pack<W: Write + Send + 'static>(
                 summary.files += 1;
                 summary.bytes += meta.len();
             }
-            Kind::Dir => {
+            Loaded::Path(entry) => {
                 tar.append_path_with_name(&entry.path, &entry.name)
-                    .with_context(context)?;
-                summary.dirs += 1;
-            }
-            Kind::Symlink { .. } => {
-                tar.append_path_with_name(&entry.path, &entry.name)
-                    .with_context(context)?;
-                summary.symlinks += 1;
+                    .with_context(|| format!("cannot add {}", entry.path.display()))?;
+                match entry.kind {
+                    Kind::Dir => summary.dirs += 1,
+                    _ => summary.symlinks += 1,
+                }
             }
         }
     }
