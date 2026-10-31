@@ -257,8 +257,15 @@ fn decode_member(member: &[u8]) -> io::Result<Vec<u8>> {
     let crc = u32::from_le_bytes(trailer[..4].try_into().expect("4 bytes"));
     let len = u32::from_le_bytes(trailer[4..].try_into().expect("4 bytes")) as usize;
 
-    let mut out = Vec::with_capacity(len.min(MAX_MEMBER_SIZE));
-    DeflateDecoder::new(body).read_to_end(&mut out)?;
+    if len > MAX_MEMBER_SIZE {
+        return Err(invalid(
+            "gzip block is larger than pakk ever writes, archive is corrupt",
+        ));
+    }
+    let mut out = Vec::with_capacity(len);
+    DeflateDecoder::new(body)
+        .take(len as u64 + 1)
+        .read_to_end(&mut out)?;
     if out.len() != len || crc32fast::hash(&out) != crc {
         return Err(invalid("gzip checksum mismatch, archive is corrupt"));
     }
@@ -323,6 +330,20 @@ mod tests {
         let mid = gz.len() / 2;
         gz[mid] ^= 0xff;
         assert!(decompress(gz).is_err());
+    }
+
+    #[test]
+    fn rejects_decompression_bomb_without_inflating_it() {
+        let mut member = encode_member(&vec![0; 16 << 20], 9).unwrap();
+        let isize_at = member.len() - 4;
+        member[isize_at..].copy_from_slice(&16u32.to_le_bytes());
+        let err = decompress(member).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let mut member = encode_member(&[1, 2, 3], 9).unwrap();
+        let isize_at = member.len() - 4;
+        member[isize_at..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decompress(member).is_err());
     }
 
     #[test]
