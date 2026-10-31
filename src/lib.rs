@@ -1,3 +1,4 @@
+pub mod chunked;
 pub mod format;
 pub mod fsutil;
 pub mod listing;

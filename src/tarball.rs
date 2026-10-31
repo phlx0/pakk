@@ -11,10 +11,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use tar::{EntryType, Header, HeaderMode};
 
+use crate::chunked::ChunkedWriter;
 use crate::format::Format;
 use crate::fsutil;
 use crate::listing::Listing;
-use crate::pgzip::{self, ParGzWriter};
+use crate::pgzip;
 use crate::progress::{Progress, Summary};
 use crate::walk::{self, Entry, Kind};
 
@@ -24,7 +25,7 @@ const PREFETCH_ENTRIES: usize = 4096;
 
 enum Encoder<W: Write> {
     Plain(W),
-    Gz(ParGzWriter<W>),
+    Gz(ChunkedWriter<W>),
     Zst(zstd::Encoder<'static, W>),
 }
 
@@ -32,7 +33,7 @@ impl<W: Write + Send + 'static> Encoder<W> {
     fn new(out: W, format: Format, level: u32, threads: usize) -> Result<Self> {
         Ok(match format {
             Format::Tar => Self::Plain(out),
-            Format::TarGz => Self::Gz(ParGzWriter::new(out, level)),
+            Format::TarGz => Self::Gz(pgzip::writer(out, level)),
             Format::TarZst => {
                 let mut encoder = zstd::Encoder::new(out, i32::try_from(level)?)?;
                 encoder.multithread(threads as u32)?;

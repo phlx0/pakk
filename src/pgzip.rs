@@ -1,7 +1,9 @@
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
-use std::mem;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
+
+use crate::chunked::ChunkedWriter;
 
 use flate2::Compression;
 use flate2::bufread::{DeflateDecoder, MultiGzDecoder};
@@ -18,103 +20,12 @@ fn batch_len() -> usize {
     rayon::current_num_threads().max(1) * 2
 }
 
-#[derive(Debug)]
-pub struct ParGzWriter<W> {
-    buf: Vec<u8>,
-    batch: Vec<Vec<u8>>,
-    batch_len: usize,
-    tx: Option<SyncSender<Vec<Vec<u8>>>>,
-    worker: Option<JoinHandle<io::Result<W>>>,
-}
-
-impl<W: Write + Send + 'static> ParGzWriter<W> {
-    pub fn new(inner: W, level: u32) -> Self {
-        let (tx, rx) = sync_channel::<Vec<Vec<u8>>>(1);
-        let worker = thread::spawn(move || compress_worker(inner, &rx, level));
-        Self {
-            buf: Vec::with_capacity(CHUNK_SIZE),
-            batch: Vec::new(),
-            batch_len: batch_len(),
-            tx: Some(tx),
-            worker: Some(worker),
-        }
-    }
-
-    pub fn finish(mut self) -> io::Result<W> {
-        if !self.buf.is_empty() {
-            self.push_chunk()?;
-        }
-        if !self.batch.is_empty() {
-            self.send_batch()?;
-        }
-        drop(self.tx.take());
-        self.join()
-    }
-
-    fn push_chunk(&mut self) -> io::Result<()> {
-        let chunk = mem::replace(&mut self.buf, Vec::with_capacity(CHUNK_SIZE));
-        self.batch.push(chunk);
-        if self.batch.len() >= self.batch_len {
-            self.send_batch()?;
-        }
-        Ok(())
-    }
-
-    fn send_batch(&mut self) -> io::Result<()> {
-        let batch = mem::take(&mut self.batch);
-        let sent = self.tx.as_ref().is_some_and(|tx| tx.send(batch).is_ok());
-        if sent {
-            Ok(())
-        } else {
-            drop(self.tx.take());
-            Err(self
-                .join()
-                .err()
-                .unwrap_or_else(|| io::Error::other("gzip worker stopped")))
-        }
-    }
-
-    fn join(&mut self) -> io::Result<W> {
-        self.worker
-            .take()
-            .ok_or_else(|| io::Error::other("gzip writer already finished"))?
-            .join()
-            .map_err(|_| io::Error::other("gzip worker panicked"))?
-    }
-}
-
-impl<W: Write + Send + 'static> Write for ParGzWriter<W> {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let n = data.len().min(CHUNK_SIZE - self.buf.len());
-        self.buf.extend_from_slice(&data[..n]);
-        if self.buf.len() == CHUNK_SIZE {
-            self.push_chunk()?;
-        }
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn compress_worker<W: Write>(mut out: W, rx: &Receiver<Vec<Vec<u8>>>, level: u32) -> io::Result<W> {
-    let mut wrote_any = false;
-    for batch in rx {
-        let members: Vec<io::Result<Vec<u8>>> = batch
-            .par_iter()
-            .map(|chunk| encode_member(chunk, level))
-            .collect();
-        for member in members {
-            out.write_all(&member?)?;
-            wrote_any = true;
-        }
-    }
-    if !wrote_any {
-        out.write_all(&encode_member(&[], level)?)?;
-    }
-    out.flush()?;
-    Ok(out)
+pub fn writer<W: Write + Send + 'static>(inner: W, level: u32) -> ChunkedWriter<W> {
+    ChunkedWriter::new(
+        inner,
+        CHUNK_SIZE,
+        Arc::new(move |chunk| encode_member(chunk, level)),
+    )
 }
 
 pub fn encode_member(data: &[u8], level: u32) -> io::Result<Vec<u8>> {
@@ -285,7 +196,7 @@ mod tests {
     }
 
     fn compress(data: &[u8]) -> Vec<u8> {
-        let mut writer = ParGzWriter::new(Vec::new(), 6);
+        let mut writer = writer(Vec::new(), 6);
         for piece in data.chunks(7919) {
             writer.write_all(piece).unwrap();
         }
