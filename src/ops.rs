@@ -38,7 +38,17 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Sum
         );
     }
 
+    if let Ok(out) = fs::canonicalize(output) {
+        for input in inputs {
+            if fs::canonicalize(input).is_ok_and(|i| i == out) {
+                bail!("{} is both an input and the output", input.display());
+            }
+        }
+    }
     let entries = walk::collect(inputs, Some(output))?;
+    if entries.is_empty() {
+        bail!("nothing to pack");
+    }
     let progress = Progress::new("packing", walk::total_size(&entries), opts.progress);
     let tmp = fsutil::create_atomic(output)?;
     let out = BufWriter::with_capacity(WRITE_BUFFER, tmp.as_file().try_clone()?);

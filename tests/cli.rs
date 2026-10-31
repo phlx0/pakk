@@ -243,3 +243,24 @@ fn system_unzip_reads_our_zip() {
     assert!(status.success());
     assert_same_tree(&ws.path().join("project"), &ws.path().join("sys/project"));
 }
+
+#[test]
+fn refuses_to_pack_a_file_onto_itself() {
+    let ws = workspace();
+    let notes = ws.path().join("project/README.md");
+    let before = fs::read(&notes).unwrap();
+    pakk(ws.path())
+        .args([
+            "pack",
+            "project/README.md",
+            "-o",
+            "project/README.md",
+            "-f",
+            "zip",
+            "--force",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("both an input and the output"));
+    assert_eq!(fs::read(&notes).unwrap(), before);
+}
