@@ -84,8 +84,9 @@ pub fn detect(archive: &Path) -> Result<Format> {
         File::open(archive).with_context(|| format!("cannot open {}", archive.display()))?;
     Format::sniff(&mut file)?.with_context(|| {
         format!(
-            "{} is not a zip, tar, tar.gz or tar.zst archive",
-            archive.display()
+            "{} is not a supported archive ({})",
+            archive.display(),
+            Format::names()
         )
     })
 }

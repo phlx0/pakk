@@ -56,7 +56,7 @@ fn has(tool: &str) -> bool {
 
 #[test]
 fn roundtrips_every_format() {
-    for format in ["zip", "tar", "tar.gz", "tar.zst"] {
+    for format in ["zip", "tar", "tar.gz", "tar.zst", "tar.xz", "tar.bz2"] {
         let ws = workspace();
         pakk(ws.path())
             .args(["pack", "project", "-f", format])
@@ -182,9 +182,7 @@ fn reports_bad_input() {
         .args(["unpack", "project/README.md"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "is not a zip, tar, tar.gz or tar.zst archive",
-        ));
+        .stderr(predicate::str::contains("is not a supported archive"));
     pakk(ws.path())
         .args(["pack", "project", "-f", "tar.zst", "-l", "40"])
         .assert()
@@ -226,6 +224,28 @@ fn system_tar_reads_our_tar_gz() {
         .unwrap();
     assert!(status.success());
     assert_same_tree(&ws.path().join("project"), &ws.path().join("sys/project"));
+}
+
+#[test]
+fn system_tar_reads_our_xz_and_bz2() {
+    if !has("tar") {
+        return;
+    }
+    for (format, flag) in [("tar.xz", "xJf"), ("tar.bz2", "xjf")] {
+        let ws = workspace();
+        pakk(ws.path())
+            .args(["pack", "project", "-f", format])
+            .assert()
+            .success();
+        fs::create_dir(ws.path().join("sys")).unwrap();
+        let status = Command::new("tar")
+            .args([flag, &format!("../project.{format}")])
+            .current_dir(ws.path().join("sys"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{format}");
+        assert_same_tree(&ws.path().join("project"), &ws.path().join("sys/project"));
+    }
 }
 
 #[test]

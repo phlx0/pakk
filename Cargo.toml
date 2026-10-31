@@ -14,6 +14,7 @@ exclude = ["/.github", "/bench"]
 
 [dependencies]
 anyhow = "1.0.104"
+bzip2 = "0.6"
 clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 clap_complete = "4.6.11"
 console = "0.16"
@@ -23,6 +24,7 @@ filetime = "0.2.29"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 indicatif = "0.18.6"
 jiff = "0.2.38"
+lzma-rust2 = "0.23"
 rayon = "1.12.0"
 tar = "0.4.46"
 tempfile = "3.27.0"

@@ -10,13 +10,20 @@ pub enum Format {
     Tar,
     TarGz,
     TarZst,
+    TarXz,
+    TarBz2,
 }
 
 const SUFFIXES: &[(&str, Format)] = &[
     (".tar.gz", Format::TarGz),
     (".tar.zst", Format::TarZst),
+    (".tar.bz2", Format::TarBz2),
+    (".tar.xz", Format::TarXz),
+    (".tbz2", Format::TarBz2),
     (".tgz", Format::TarGz),
     (".tzst", Format::TarZst),
+    (".txz", Format::TarXz),
+    (".tbz", Format::TarBz2),
     (".zip", Format::Zip),
     (".tar", Format::Tar),
 ];
@@ -24,6 +31,15 @@ const SUFFIXES: &[(&str, Format)] = &[
 pub const SNIFF_LEN: usize = 512;
 
 impl Format {
+    pub const ALL: [Self; 6] = [
+        Self::Zip,
+        Self::Tar,
+        Self::TarGz,
+        Self::TarZst,
+        Self::TarXz,
+        Self::TarBz2,
+    ];
+
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
@@ -40,6 +56,33 @@ impl Format {
             [b'P', b'K', 3, 4, ..] | [b'P', b'K', 5, 6, ..] => Some(Self::Zip),
             [0x1f, 0x8b, ..] => Some(Self::TarGz),
             [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(Self::TarZst),
+            [0xfd, b'7', b'z', b'X', b'Z', 0, ..] => Some(Self::TarXz),
+            [
+                b'B',
+                b'Z',
+                b'h',
+                b'1'..=b'9',
+                0x31,
+                0x41,
+                0x59,
+                0x26,
+                0x53,
+                0x59,
+                ..,
+            ]
+            | [
+                b'B',
+                b'Z',
+                b'h',
+                b'1'..=b'9',
+                0x17,
+                0x72,
+                0x45,
+                0x38,
+                0x50,
+                0x90,
+                ..,
+            ] => Some(Self::TarBz2),
             _ if head.len() >= 262 && &head[257..262] == b"ustar" => Some(Self::Tar),
             _ => None,
         }
@@ -58,14 +101,22 @@ impl Format {
             Self::Tar => "tar",
             Self::TarGz => "tar.gz",
             Self::TarZst => "tar.zst",
+            Self::TarXz => "tar.xz",
+            Self::TarBz2 => "tar.bz2",
         }
+    }
+
+    #[must_use]
+    pub fn names() -> String {
+        Self::ALL.map(Self::extension).join(", ")
     }
 
     #[must_use]
     pub const fn levels(self) -> RangeInclusive<u32> {
         match self {
-            Self::Zip | Self::TarGz => 0..=9,
+            Self::Zip | Self::TarGz | Self::TarXz => 0..=9,
             Self::TarZst => 1..=22,
+            Self::TarBz2 => 1..=9,
             Self::Tar => 0..=0,
         }
     }
@@ -73,8 +124,9 @@ impl Format {
     #[must_use]
     pub const fn default_level(self) -> u32 {
         match self {
-            Self::Zip | Self::TarGz => 6,
+            Self::Zip | Self::TarGz | Self::TarXz => 6,
             Self::TarZst => 3,
+            Self::TarBz2 => 9,
             Self::Tar => 0,
         }
     }
@@ -106,8 +158,11 @@ impl FromStr for Format {
             "tar" => Ok(Self::Tar),
             "tar.gz" | "tgz" | "gz" | "gzip" => Ok(Self::TarGz),
             "tar.zst" | "tzst" | "zst" | "zstd" => Ok(Self::TarZst),
+            "tar.xz" | "txz" | "xz" => Ok(Self::TarXz),
+            "tar.bz2" | "tbz2" | "tbz" | "bz2" | "bzip2" => Ok(Self::TarBz2),
             _ => Err(format!(
-                "unknown format `{s}` (expected zip, tar, tar.gz or tar.zst)"
+                "unknown format `{s}` (expected one of: {})",
+                Self::names()
             )),
         }
     }
@@ -127,6 +182,10 @@ mod tests {
             ("a.tgz", Some(Format::TarGz)),
             ("dir/a.tar.zst", Some(Format::TarZst)),
             ("a.tzst", Some(Format::TarZst)),
+            ("a.tar.xz", Some(Format::TarXz)),
+            ("a.txz", Some(Format::TarXz)),
+            ("a.tar.bz2", Some(Format::TarBz2)),
+            ("a.tbz2", Some(Format::TarBz2)),
             ("a.gz", None),
             ("a.txt", None),
             (".zip", None),
@@ -148,6 +207,12 @@ mod tests {
         let mut tar = vec![0u8; 512];
         tar[257..262].copy_from_slice(b"ustar");
         assert_eq!(Format::from_magic(&tar), Some(Format::Tar));
+        assert_eq!(
+            Format::from_magic(&[0xfd, b'7', b'z', b'X', b'Z', 0]),
+            Some(Format::TarXz)
+        );
+        assert_eq!(Format::from_magic(b"BZh91AY&SY"), Some(Format::TarBz2));
+        assert_eq!(Format::from_magic(b"BZh9 is just text"), None);
         assert_eq!(Format::from_magic(b"hello"), None);
         assert_eq!(Format::from_magic(b""), None);
     }
@@ -162,7 +227,7 @@ mod tests {
 
     #[test]
     fn default_level_is_in_range() {
-        for format in [Format::Zip, Format::Tar, Format::TarGz, Format::TarZst] {
+        for format in Format::ALL {
             assert!(
                 format.levels().contains(&format.default_level()),
                 "{format}"

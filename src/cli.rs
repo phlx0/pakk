@@ -8,7 +8,7 @@ use pakk::format::Format;
 #[command(
     name = "pakk",
     version,
-    about = "Create and extract zip, tar.gz and tar.zst archives using every core you have",
+    about = "Create and extract zip, tar.gz, tar.zst, tar.xz and tar.bz2 archives using every core you have",
     after_help = "Examples:\n  pakk pack photos/              → photos.zip\n  pakk pack src/ -f tar.zst      → src.tar.zst\n  pakk unpack release.tar.gz     → ./release/\n  pakk list backup.zip -l"
 )]
 pub struct Cli {
@@ -52,11 +52,11 @@ pub struct PackArgs {
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
-    /// Archive format when it cannot be inferred from --output [zip, tar, tar.gz, tar.zst]
+    /// Archive format when it cannot be inferred from --output [zip, tar, tar.gz, tar.zst, tar.xz, tar.bz2]
     #[arg(short, long, value_name = "FORMAT")]
     pub format: Option<Format>,
 
-    /// Compression level: 0-9 for zip and tar.gz, 1-22 for tar.zst
+    /// Compression level: 0-9 for zip, tar.gz and tar.xz, 1-9 for tar.bz2, 1-22 for tar.zst
     #[arg(short, long, value_name = "N")]
     pub level: Option<u32>,
 

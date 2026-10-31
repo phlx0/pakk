@@ -20,26 +20,48 @@ use crate::progress::{Progress, Summary};
 use crate::walk::{self, Entry, Kind};
 
 const INLINE_LIMIT: u64 = 8 << 20;
+const XZ_MEM_LIMIT_KIB: u32 = 512 * 1024;
 const PREFETCH_BYTES: u64 = 64 << 20;
 const PREFETCH_ENTRIES: usize = 4096;
 
 enum Encoder<W: Write> {
     Plain(W),
-    Gz(ChunkedWriter<W>),
+    Chunked(ChunkedWriter<W>),
     Zst(zstd::Encoder<'static, W>),
+    Xz(Box<lzma_rust2::XzWriterMt<W>>),
 }
 
 impl<W: Write + Send + 'static> Encoder<W> {
     fn new(out: W, format: Format, level: u32, threads: usize) -> Result<Self> {
         Ok(match format {
             Format::Tar => Self::Plain(out),
-            Format::TarGz => Self::Gz(pgzip::writer(out, level)),
+            Format::TarGz => Self::Chunked(pgzip::writer(out, level)),
             Format::TarZst => {
                 let mut encoder = zstd::Encoder::new(out, i32::try_from(level)?)?;
                 encoder.multithread(threads as u32)?;
                 encoder.include_checksum(true)?;
                 Self::Zst(encoder)
             }
+            Format::TarXz => {
+                let mut options = lzma_rust2::XzOptions::with_preset(level);
+                let block = (u64::from(options.lzma_options.dict_size) * 3).max(1 << 20);
+                options.set_block_size(std::num::NonZeroU64::new(block));
+                Self::Xz(Box::new(lzma_rust2::XzWriterMt::new(
+                    out,
+                    options,
+                    threads as u32,
+                )?))
+            }
+            Format::TarBz2 => Self::Chunked(ChunkedWriter::new(
+                out,
+                level as usize * 100_000,
+                std::sync::Arc::new(move |chunk: &[u8]| {
+                    let mut encoder =
+                        bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(level));
+                    encoder.write_all(chunk)?;
+                    encoder.finish()
+                }),
+            )),
             Format::Zip => bail!("zip is not a tar format"),
         })
     }
@@ -47,8 +69,9 @@ impl<W: Write + Send + 'static> Encoder<W> {
     fn finish(self) -> io::Result<W> {
         match self {
             Self::Plain(w) => Ok(w),
-            Self::Gz(w) => w.finish(),
+            Self::Chunked(w) => w.finish(),
             Self::Zst(w) => w.finish(),
+            Self::Xz(w) => w.finish(),
         }
     }
 }
@@ -57,16 +80,18 @@ impl<W: Write + Send + 'static> Write for Encoder<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Plain(w) => w.write(buf),
-            Self::Gz(w) => w.write(buf),
+            Self::Chunked(w) => w.write(buf),
             Self::Zst(w) => w.write(buf),
+            Self::Xz(w) => w.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Plain(w) => w.flush(),
-            Self::Gz(w) => w.flush(),
+            Self::Chunked(w) => w.flush(),
             Self::Zst(w) => w.flush(),
+            Self::Xz(w) => w.flush(),
         }
     }
 }
@@ -184,6 +209,12 @@ fn open(
         Format::Tar => Box::new(reader),
         Format::TarGz => pgzip::decoder(reader)?,
         Format::TarZst => Box::new(zstd::Decoder::with_buffer(reader)?),
+        Format::TarXz => Box::new(lzma_rust2::XzReader::new_mem_limit(
+            reader,
+            true,
+            XZ_MEM_LIMIT_KIB,
+        )),
+        Format::TarBz2 => Box::new(bzip2::bufread::MultiBzDecoder::new(reader)),
         Format::Zip => bail!("zip is not a tar format"),
     };
     Ok(tar::Archive::new(decoder))
@@ -550,6 +581,16 @@ mod tests {
     #[test]
     fn roundtrips_tar_zst() {
         roundtrip(Format::TarZst, 3);
+    }
+
+    #[test]
+    fn roundtrips_tar_xz() {
+        roundtrip(Format::TarXz, 6);
+    }
+
+    #[test]
+    fn roundtrips_tar_bz2() {
+        roundtrip(Format::TarBz2, 9);
     }
 
     #[test]
