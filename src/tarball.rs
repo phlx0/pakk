@@ -1,8 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -204,34 +205,100 @@ enum Deferred {
     HardLink(PathBuf, PathBuf),
 }
 
+enum Msg {
+    Write(Job),
+    Flush,
+}
+
+struct Pool<'a> {
+    tx: SyncSender<Msg>,
+    barrier: &'a Barrier,
+    workers: usize,
+}
+
+impl Pool<'_> {
+    fn write(&self, job: Job) -> bool {
+        self.tx.send(Msg::Write(job)).is_ok()
+    }
+
+    fn flush(&self) -> bool {
+        for _ in 0..self.workers {
+            if self.tx.send(Msg::Flush).is_err() {
+                return false;
+            }
+        }
+        self.barrier.wait();
+        true
+    }
+}
+
+#[derive(Default)]
+struct Links {
+    items: Vec<Option<Deferred>>,
+    by_path: HashMap<PathBuf, usize>,
+}
+
+impl Links {
+    fn set(&mut self, rel: PathBuf, item: Deferred) {
+        if let Some(&i) = self.by_path.get(&rel) {
+            self.items[i] = Some(item);
+        } else {
+            self.by_path.insert(rel, self.items.len());
+            self.items.push(Some(item));
+        }
+    }
+
+    fn remove(&mut self, rel: &Path) {
+        if let Some(i) = self.by_path.remove(rel) {
+            self.items[i] = None;
+        }
+    }
+
+    fn into_ordered(self) -> Vec<Deferred> {
+        let mut items: Vec<_> = self.items.into_iter().flatten().collect();
+        items.sort_by_key(|item| matches!(item, Deferred::Symlink(..)));
+        items
+    }
+}
+
 pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) -> Result<Summary> {
     let mut tar = open(archive, format, progress)?;
     let workers = rayon::current_num_threads().max(2);
-    let (tx, rx) = sync_channel::<Job>(workers * 4);
+    let (tx, rx) = sync_channel::<Msg>(workers * 4);
     let rx = Mutex::new(rx);
+    let barrier = Barrier::new(workers + 1);
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
 
     let read = thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
-                while let Ok(job) = rx.lock().map_err(drop).and_then(|r| r.recv().map_err(drop)) {
-                    if let Err(err) = write_job(&job) {
-                        failure.lock().expect("lock").get_or_insert(err);
+                while let Ok(msg) = rx.lock().map_err(drop).and_then(|r| r.recv().map_err(drop)) {
+                    match msg {
+                        Msg::Write(job) => {
+                            if let Err(err) = write_job(&job) {
+                                failure.lock().expect("lock").get_or_insert(err);
+                            }
+                        }
+                        Msg::Flush => {
+                            barrier.wait();
+                        }
                     }
                 }
             });
         }
-        let read = read_entries(&mut tar, dest, &tx, &failure);
-        drop(tx);
-        read
+        let pool = Pool {
+            tx,
+            barrier: &barrier,
+            workers,
+        };
+        read_entries(&mut tar, dest, &pool, &failure)
     });
 
     if let Some(err) = failure.into_inner().expect("lock") {
         return Err(err);
     }
-    let (summary, dirs, mut deferred) = read?;
-    deferred.sort_by_key(|item| matches!(item, Deferred::Symlink(..)));
-    for item in deferred {
+    let (summary, dirs, links) = read?;
+    for item in links.into_ordered() {
         create_link(item)?;
     }
     for (dir, meta) in dirs.iter().rev() {
@@ -240,17 +307,18 @@ pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) 
     Ok(summary)
 }
 
-type ReadResult = (Summary, Vec<(PathBuf, Meta)>, Vec<Deferred>);
+type ReadResult = (Summary, Vec<(PathBuf, Meta)>, Links);
 
 fn read_entries<R: Read>(
     tar: &mut tar::Archive<R>,
     dest: &Path,
-    tx: &SyncSender<Job>,
+    pool: &Pool<'_>,
     failure: &Mutex<Option<anyhow::Error>>,
 ) -> Result<ReadResult> {
     let mut summary = Summary::default();
     let mut dirs = Vec::new();
-    let mut deferred = Vec::new();
+    let mut links = Links::default();
+    let mut written = HashSet::new();
     let mut beneath = fsutil::Beneath::new(dest);
 
     for entry in tar.entries().context("cannot read archive")? {
@@ -279,7 +347,7 @@ fn read_entries<R: Read>(
             EntryType::Symlink => {
                 let target = entry.link_name()?.unwrap_or_default().into_owned();
                 beneath.create_parent(&rel)?;
-                deferred.push(Deferred::Symlink(path, target, meta));
+                links.set(rel, Deferred::Symlink(path, target, meta));
                 summary.symlinks += 1;
             }
             EntryType::Link => {
@@ -287,11 +355,15 @@ fn read_entries<R: Read>(
                 beneath.create_parent(&target)?;
                 let target = dest.join(target);
                 beneath.create_parent(&rel)?;
-                deferred.push(Deferred::HardLink(path, target));
+                links.set(rel, Deferred::HardLink(path, target));
                 summary.files += 1;
             }
             EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => {
                 beneath.create_parent(&rel)?;
+                links.remove(&rel);
+                if !written.insert(rel.clone()) && !pool.flush() {
+                    break;
+                }
                 let size = entry.size();
                 summary.files += 1;
                 summary.bytes += size;
@@ -304,7 +376,7 @@ fn read_entries<R: Read>(
                 } else {
                     let mut data = Vec::with_capacity(size as usize);
                     entry.read_to_end(&mut data).context("corrupt archive")?;
-                    if tx.send(Job { path, data, meta }).is_err() {
+                    if !pool.write(Job { path, data, meta }) {
                         break;
                     }
                 }
@@ -312,7 +384,7 @@ fn read_entries<R: Read>(
             _ => {}
         }
     }
-    Ok((summary, dirs, deferred))
+    Ok((summary, dirs, links))
 }
 
 fn safe_path(raw: &Path) -> Result<PathBuf> {

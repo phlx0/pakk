@@ -330,3 +330,33 @@ fn never_extracts_through_existing_symlinks() {
     }
     assert_eq!(fs::read_dir(ws.path().join("outside")).unwrap().count(), 0);
 }
+
+#[test]
+fn last_duplicate_entry_wins() {
+    let ws = workspace();
+    let mut data = Vec::new();
+    {
+        let mut tar = tar::Builder::new(&mut data);
+        for i in 0..400 {
+            let body = vec![if i % 2 == 0 { b'A' } else { b'B' }; 1000 + i];
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "f", body.as_slice()).unwrap();
+        }
+        tar.finish().unwrap();
+    }
+    fs::write(ws.path().join("dup.tar"), data).unwrap();
+    for run in 0..10 {
+        let dest = format!("out{run}");
+        pakk(ws.path())
+            .args(["unpack", "dup.tar", "-C", &dest])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::read(ws.path().join(dest).join("f")).unwrap(),
+            vec![b'B'; 1399]
+        );
+    }
+}

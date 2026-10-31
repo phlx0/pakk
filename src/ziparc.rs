@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -229,6 +229,8 @@ fn open(archive: &Path) -> Result<ZipArchive<SharedFile>> {
 
 fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
     let mut plan = Plan::default();
+    let mut leaves = Vec::new();
+    let mut last = HashMap::new();
     for index in 0..zip.len() {
         let file = zip.by_index_raw(index)?;
         if file.encrypted() {
@@ -260,10 +262,16 @@ fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
         if let Some(parent) = planned.path.parent() {
             plan.parents.insert(parent.to_path_buf());
         }
-        if file.is_symlink() {
+        if let Some(i) = last.insert(planned.path.clone(), leaves.len()) {
+            leaves[i] = None;
+        }
+        leaves.push(Some((planned, file.is_symlink(), file.size())));
+    }
+    for (planned, is_symlink, size) in leaves.into_iter().flatten() {
+        if is_symlink {
             plan.symlinks.push(planned);
         } else {
-            plan.bytes += file.size();
+            plan.bytes += size;
             plan.files.push(planned);
         }
     }
