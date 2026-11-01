@@ -115,21 +115,30 @@ impl Read for ParGzReader {
     }
 }
 
+enum Next {
+    Member(Vec<u8>),
+    Foreign(Vec<u8>),
+    End,
+}
+
 fn decompress_worker<R: Read>(
     mut reader: R,
     tx: &SyncSender<io::Result<Vec<u8>>>,
 ) -> io::Result<()> {
     loop {
         let mut members = Vec::with_capacity(batch_len());
+        let mut foreign = None;
         while members.len() < members.capacity() {
             match read_member(&mut reader)? {
-                Some(member) => members.push(member),
-                None => break,
+                Next::Member(member) => members.push(member),
+                Next::Foreign(head) => {
+                    foreign = Some(head);
+                    break;
+                }
+                Next::End => break,
             }
         }
-        if members.is_empty() {
-            return Ok(());
-        }
+        let done = members.is_empty() && foreign.is_none();
         let decoded: Vec<io::Result<Vec<u8>>> =
             members.par_iter().map(|m| decode_member(m)).collect();
         for chunk in decoded {
@@ -137,21 +146,41 @@ fn decompress_worker<R: Read>(
                 return Ok(());
             }
         }
+        if let Some(head) = foreign {
+            return decode_sequential(Cursor::new(head).chain(reader), tx);
+        }
+        if done {
+            return Ok(());
+        }
     }
 }
 
-fn read_member<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+fn decode_sequential<R: Read>(reader: R, tx: &SyncSender<io::Result<Vec<u8>>>) -> io::Result<()> {
+    let mut decoder = MultiGzDecoder::new(BufReader::with_capacity(CHUNK_SIZE, reader));
+    loop {
+        let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+        (&mut decoder)
+            .take(CHUNK_SIZE as u64)
+            .read_to_end(&mut chunk)?;
+        if chunk.is_empty() || tx.send(Ok(chunk)).is_err() {
+            return Ok(());
+        }
+    }
+}
+
+fn read_member<R: Read>(reader: &mut R) -> io::Result<Next> {
     let mut header = [0u8; HEADER_LEN];
     let mut filled = 0;
     while filled < HEADER_LEN {
         match reader.read(&mut header[filled..])? {
-            0 if filled == 0 => return Ok(None),
-            0 => return Err(invalid("truncated gzip member header")),
+            0 if filled == 0 => return Ok(Next::End),
+            0 => return Ok(Next::Foreign(header[..filled].to_vec())),
             n => filled += n,
         }
     }
-    let size = member_size(&header)
-        .ok_or_else(|| invalid("gzip stream mixes pakk and foreign members"))?;
+    let Some(size) = member_size(&header) else {
+        return Ok(Next::Foreign(header.to_vec()));
+    };
     let mut member = Vec::with_capacity(size);
     member.extend_from_slice(&header);
     reader
@@ -160,7 +189,7 @@ fn read_member<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     if member.len() != size {
         return Err(invalid("truncated gzip member"));
     }
-    Ok(Some(member))
+    Ok(Next::Member(member))
 }
 
 fn decode_member(member: &[u8]) -> io::Result<Vec<u8>> {
@@ -233,6 +262,19 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&data).unwrap();
         assert_eq!(decompress(enc.finish().unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn reads_pakk_gzip_followed_by_foreign_gzip() {
+        let first = sample(2 * CHUNK_SIZE + 3);
+        let second = sample(70_000);
+        let mut gz = compress(&first);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&second).unwrap();
+        gz.extend(enc.finish().unwrap());
+        let mut expected = first;
+        expected.extend(second);
+        assert_eq!(decompress(gz).unwrap(), expected);
     }
 
     #[test]
