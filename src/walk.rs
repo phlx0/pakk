@@ -4,7 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
@@ -32,13 +33,19 @@ impl Entry {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Filters {
+    pub exclude: Vec<String>,
+    pub gitignore: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Collected {
     pub entries: Vec<Entry>,
     pub skipped: Vec<PathBuf>,
 }
 
-pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Collected> {
+pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>, filters: &Filters) -> Result<Collected> {
     let exclude = exclude.and_then(|p| fs::canonicalize(p).ok());
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
@@ -52,7 +59,7 @@ pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Collected> 
             input.file_name().map(PathBuf::from)
         };
 
-        for item in WalkDir::new(input).follow_links(false).sort_by_file_name() {
+        for item in walker(input, filters)?.build() {
             let item = item.with_context(|| format!("cannot walk {}", input.display()))?;
             let rel = item.path().strip_prefix(input).unwrap_or(item.path());
             let name_path = match &prefix {
@@ -64,9 +71,12 @@ pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Collected> 
                 continue;
             }
 
-            let meta = item
-                .metadata()
-                .with_context(|| format!("cannot stat {}", item.path().display()))?;
+            let meta = if item.depth() == 0 {
+                fs::symlink_metadata(item.path()).map_err(ignore::Error::from)
+            } else {
+                item.metadata()
+            }
+            .with_context(|| format!("cannot stat {}", item.path().display()))?;
             let Some(entry) = make_entry(item.path(), archive_name(&name_path)?, &meta)? else {
                 skipped.push(item.path().to_path_buf());
                 continue;
@@ -100,6 +110,34 @@ pub fn batches(entries: &[Entry], max_bytes: u64, max_len: usize, cap: u64) -> V
 #[must_use]
 pub fn total_size(entries: &[Entry]) -> u64 {
     entries.iter().map(Entry::size).sum()
+}
+
+fn walker(input: &Path, filters: &Filters) -> Result<WalkBuilder> {
+    let mut overrides = OverrideBuilder::new(input);
+    for pattern in &filters.exclude {
+        overrides
+            .add(&format!("!{pattern}"))
+            .with_context(|| format!("invalid --exclude pattern `{pattern}`"))?;
+    }
+    if filters.gitignore {
+        overrides.add("!.git/")?;
+    }
+    let mut walker = WalkBuilder::new(input);
+    walker
+        .standard_filters(false)
+        .hidden(false)
+        .follow_links(false)
+        .sort_by_file_name(Ord::cmp)
+        .overrides(overrides.build()?);
+    if filters.gitignore {
+        walker
+            .git_ignore(true)
+            .git_exclude(true)
+            .ignore(true)
+            .parents(true)
+            .require_git(false);
+    }
+    Ok(walker)
 }
 
 fn is_contents_only(input: &Path) -> bool {
@@ -185,7 +223,9 @@ mod tests {
     #[test]
     fn walks_directory_sorted_with_prefix() {
         let dir = tree();
-        let entries = collect(&[dir.path().join("proj")], None).unwrap().entries;
+        let entries = collect(&[dir.path().join("proj")], None, &Filters::default())
+            .unwrap()
+            .entries;
         assert_eq!(
             names(&entries),
             [
@@ -204,7 +244,7 @@ mod tests {
     #[test]
     fn dot_input_has_no_prefix() {
         let dir = tree();
-        let entries = collect(&[dir.path().join("proj/src/.")], None)
+        let entries = collect(&[dir.path().join("proj/src/.")], None, &Filters::default())
             .unwrap()
             .entries;
         assert_eq!(names(&entries), ["a.rs", "b.rs", "deep", "deep/c.rs"]);
@@ -214,7 +254,7 @@ mod tests {
     fn excludes_output_file() {
         let dir = tree();
         let out = dir.path().join("proj/README");
-        let entries = collect(&[dir.path().join("proj")], Some(&out))
+        let entries = collect(&[dir.path().join("proj")], Some(&out), &Filters::default())
             .unwrap()
             .entries;
         assert!(!names(&entries).contains(&"proj/README"));
@@ -224,7 +264,7 @@ mod tests {
     fn rejects_duplicate_names() {
         let dir = tree();
         let input = dir.path().join("proj/README");
-        let err = collect(&[input.clone(), input], None).unwrap_err();
+        let err = collect(&[input.clone(), input], None, &Filters::default()).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
@@ -252,13 +292,74 @@ mod tests {
         let dir = tree();
         let bad = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
         fs::write(dir.path().join("proj").join(bad), "x").unwrap();
-        let err = collect(&[dir.path().join("proj")], None).unwrap_err();
+        let err = collect(&[dir.path().join("proj")], None, &Filters::default()).unwrap_err();
         assert!(err.to_string().contains("non-UTF-8"), "{err}");
     }
 
     #[test]
+    fn excludes_globs_anywhere_in_the_tree() {
+        let dir = tree();
+        let filters = Filters {
+            exclude: vec!["*.rs".into(), "deep".into()],
+            gitignore: false,
+        };
+        let entries = collect(&[dir.path().join("proj")], None, &filters)
+            .unwrap()
+            .entries;
+        assert_eq!(names(&entries), ["proj", "proj/README", "proj/src"]);
+    }
+
+    #[test]
+    fn respects_gitignore_only_when_asked() {
+        let dir = tree();
+        let root = dir.path().join("proj");
+        fs::write(root.join(".gitignore"), "/src/deep/\n*.rs\n!a.rs\n").unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/HEAD"), "ref").unwrap();
+
+        let all = collect(std::slice::from_ref(&root), None, &Filters::default())
+            .unwrap()
+            .entries;
+        assert!(names(&all).contains(&"proj/src/b.rs"));
+        assert!(names(&all).contains(&"proj/.git/HEAD"));
+
+        let filters = Filters {
+            gitignore: true,
+            ..Filters::default()
+        };
+        let kept = collect(&[root], None, &filters).unwrap().entries;
+        assert_eq!(
+            names(&kept),
+            [
+                "proj",
+                "proj/.gitignore",
+                "proj/README",
+                "proj/src",
+                "proj/src/a.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_patterns() {
+        let dir = tree();
+        let filters = Filters {
+            exclude: vec!["a[".into()],
+            gitignore: false,
+        };
+        assert!(collect(&[dir.path().join("proj")], None, &filters).is_err());
+    }
+
+    #[test]
     fn missing_input_is_an_error() {
-        assert!(collect(&[PathBuf::from("/definitely/not/here")], None).is_err());
+        assert!(
+            collect(
+                &[PathBuf::from("/definitely/not/here")],
+                None,
+                &Filters::default()
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -273,7 +374,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let collected = collect(&[dir.path().join("proj")], None).unwrap();
+        let collected = collect(&[dir.path().join("proj")], None, &Filters::default()).unwrap();
         assert_eq!(collected.skipped, [fifo]);
         assert!(!names(&collected.entries).contains(&"proj/pipe"));
     }
@@ -283,7 +384,9 @@ mod tests {
     fn records_symlinks_without_following() {
         let dir = tree();
         std::os::unix::fs::symlink("README", dir.path().join("proj/link")).unwrap();
-        let entries = collect(&[dir.path().join("proj")], None).unwrap().entries;
+        let entries = collect(&[dir.path().join("proj")], None, &Filters::default())
+            .unwrap()
+            .entries;
         let link = entries.iter().find(|e| e.name == "proj/link").unwrap();
         assert_eq!(
             link.kind,

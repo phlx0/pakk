@@ -414,7 +414,9 @@ mod tests {
     }
 
     fn pack_to_vec(dir: &Path) -> Vec<u8> {
-        let entries = walk::collect(&[dir.join("src")], None).unwrap().entries;
+        let entries = walk::collect(&[dir.join("src")], None, &walk::Filters::default())
+            .unwrap()
+            .entries;
         let (cursor, summary) =
             pack(&entries, Cursor::new(Vec::new()), 6, &Progress::hidden()).unwrap();
         assert_eq!(summary.files, 4);

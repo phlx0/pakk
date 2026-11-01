@@ -63,6 +63,14 @@ pub struct PackArgs {
     /// Overwrite the output if it already exists
     #[arg(long)]
     pub force: bool,
+
+    /// Leave out paths matching a gitignore-style glob (repeatable)
+    #[arg(short = 'x', long, value_name = "GLOB")]
+    pub exclude: Vec<String>,
+
+    /// Leave out files ignored by .gitignore, .ignore and .git/info/exclude
+    #[arg(short, long)]
+    pub gitignore: bool,
 }
 
 #[derive(Debug, Args)]

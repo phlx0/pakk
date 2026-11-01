@@ -18,6 +18,7 @@ pub struct PackOptions {
     pub level: Option<u32>,
     pub force: bool,
     pub progress: bool,
+    pub filters: walk::Filters,
 }
 
 #[derive(Debug)]
@@ -51,7 +52,7 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Pac
             }
         }
     }
-    let walk::Collected { entries, skipped } = walk::collect(inputs, Some(output))?;
+    let walk::Collected { entries, skipped } = walk::collect(inputs, Some(output), &opts.filters)?;
     if entries.is_empty() {
         bail!("nothing to pack");
     }

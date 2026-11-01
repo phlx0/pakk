@@ -521,3 +521,34 @@ fn decompresses_single_files() {
         .success()
         .stdout(predicate::str::contains("app.log"));
 }
+
+#[test]
+fn excludes_and_respects_gitignore() {
+    let ws = workspace();
+    fs::create_dir_all(ws.path().join("project/target/debug")).unwrap();
+    fs::write(ws.path().join("project/target/debug/app"), "binary").unwrap();
+    fs::write(ws.path().join("project/.gitignore"), "target/\n").unwrap();
+    fs::write(ws.path().join("project/notes.tmp"), "scratch").unwrap();
+
+    pakk(ws.path())
+        .args([
+            "pack",
+            "project",
+            "-o",
+            "a.zip",
+            "--gitignore",
+            "-x",
+            "*.tmp",
+        ])
+        .assert()
+        .success();
+    pakk(ws.path())
+        .args(["list", "a.zip"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("project/src/main.rs")
+                .and(predicate::str::contains("target").not())
+                .and(predicate::str::contains("notes.tmp").not()),
+        );
+}

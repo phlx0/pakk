@@ -60,6 +60,10 @@ fn pack(args: &PackArgs, progress: bool, quiet: bool) -> Result<()> {
         level: args.level,
         force: args.force,
         progress,
+        filters: pakk::walk::Filters {
+            exclude: args.exclude.clone(),
+            gitignore: args.gitignore,
+        },
     };
     let ops::Packed { summary, skipped } = ops::pack(&args.inputs, &output, &opts)?;
     for path in &skipped {

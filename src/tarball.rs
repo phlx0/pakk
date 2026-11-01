@@ -622,7 +622,7 @@ mod tests {
 
     fn roundtrip(format: Format, level: u32) {
         let dir = fixture();
-        let entries = walk::collect(&[dir.path().join("site")], None)
+        let entries = walk::collect(&[dir.path().join("site")], None, &walk::Filters::default())
             .unwrap()
             .entries;
         let archive = dir.path().join(format!("out.{format}"));
