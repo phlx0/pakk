@@ -109,7 +109,13 @@ fn resolve_output(args: &PackArgs) -> Result<(PathBuf, Format)> {
         _ => None,
     };
     let Some(base) = base else {
-        bail!("pass --output when packing several inputs");
+        if args.inputs.len() > 1 {
+            bail!("pass --output when packing several inputs");
+        }
+        bail!(
+            "cannot derive an archive name from {}; pass --output",
+            args.inputs[0].display()
+        );
     };
     let mut name = base;
     name.push(".");
