@@ -10,7 +10,7 @@ repository = "https://github.com/phlx0/pakk"
 readme = "README.md"
 keywords = ["zip", "tar", "gzip", "compression", "parallel"]
 categories = ["command-line-utilities", "compression"]
-exclude = ["/.github", "/bench"]
+exclude = ["/.github", "/bench", "/fuzz"]
 
 [dependencies]
 anyhow = "1.0.104"
