@@ -12,6 +12,7 @@ use indicatif::{HumanBytes, HumanCount};
 use pakk::format::Format;
 use pakk::listing::Listing;
 use pakk::ops::{self, PackOptions};
+use pakk::options::UnpackOptions;
 use pakk::progress::Summary;
 use pakk::walk::Kind;
 
@@ -42,8 +43,8 @@ fn run(cli: Cli) -> Result<()> {
     }
     let show = !cli.quiet && io::stderr().is_terminal();
     match cli.command {
-        Command::Pack(args) => pack(&args, show, cli.quiet),
-        Command::Unpack(args) => unpack(&args, show, cli.quiet),
+        Command::Pack(args) => pack(&args, show, cli.verbose, cli.quiet),
+        Command::Unpack(args) => unpack(&args, show, cli.verbose, cli.quiet),
         Command::List(args) => list(&args),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "pakk", &mut io::stdout());
@@ -52,7 +53,7 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn pack(args: &PackArgs, progress: bool, quiet: bool) -> Result<()> {
+fn pack(args: &PackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<()> {
     let (output, format) = resolve_output(args)?;
     let started = Instant::now();
     let opts = PackOptions {
@@ -60,6 +61,7 @@ fn pack(args: &PackArgs, progress: bool, quiet: bool) -> Result<()> {
         level: args.level,
         force: args.force,
         progress,
+        verbose,
         filters: pakk::walk::Filters {
             exclude: args.exclude.clone(),
             gitignore: args.gitignore,
@@ -127,9 +129,14 @@ fn resolve_output(args: &PackArgs) -> Result<(PathBuf, Format)> {
     Ok((PathBuf::from(name), format))
 }
 
-fn unpack(args: &UnpackArgs, progress: bool, quiet: bool) -> Result<()> {
+fn unpack(args: &UnpackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<()> {
     let started = Instant::now();
-    let (dest, summary) = ops::unpack(&args.archive, args.dest.as_deref(), progress)?;
+    let opts = UnpackOptions {
+        strip: args.strip,
+        keep: args.keep,
+    };
+    let display = ops::Display { progress, verbose };
+    let (dest, summary) = ops::unpack(&args.archive, args.dest.as_deref(), &opts, display)?;
     if !quiet {
         report(
             "unpacked",

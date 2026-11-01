@@ -552,3 +552,46 @@ fn excludes_and_respects_gitignore() {
                 .and(predicate::str::contains("notes.tmp").not()),
         );
 }
+
+#[test]
+fn strips_components_keeps_existing_and_lists_verbosely() {
+    let ws = workspace();
+    for format in ["zip", "tar.gz"] {
+        let archive = format!("project.{format}");
+        pakk(ws.path())
+            .args(["pack", "project", "-f", format, "--force"])
+            .assert()
+            .success();
+
+        let flat = format!("flat-{format}");
+        pakk(ws.path())
+            .args([
+                "-v",
+                "unpack",
+                &archive,
+                "-C",
+                &flat,
+                "--strip-components",
+                "1",
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("src/main.rs"));
+        assert!(ws.path().join(&flat).join("src/main.rs").is_file());
+        assert!(!ws.path().join(&flat).join("project").exists());
+
+        fs::write(ws.path().join(&flat).join("README.md"), "mine").unwrap();
+        pakk(ws.path())
+            .args(["unpack", &archive, "-C", &flat, "--strip", "1", "--keep"])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::read_to_string(ws.path().join(&flat).join("README.md")).unwrap(),
+            "mine"
+        );
+    }
+    pakk(ws.path())
+        .args(["-q", "-v", "list", "project.zip"])
+        .assert()
+        .failure();
+}

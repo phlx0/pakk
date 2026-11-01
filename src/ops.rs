@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::format::Format;
 use crate::fsutil;
 use crate::listing::Listing;
+use crate::options::UnpackOptions;
 use crate::progress::{Progress, Summary};
 use crate::{tarball, walk, ziparc};
 
@@ -18,6 +19,7 @@ pub struct PackOptions {
     pub level: Option<u32>,
     pub force: bool,
     pub progress: bool,
+    pub verbose: bool,
     pub filters: walk::Filters,
 }
 
@@ -56,7 +58,12 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Pac
     if entries.is_empty() {
         bail!("nothing to pack");
     }
-    let progress = Progress::new("packing", walk::total_size(&entries), opts.progress);
+    let progress = Progress::new(
+        "packing",
+        walk::total_size(&entries),
+        opts.progress,
+        opts.verbose,
+    );
     let tmp = fsutil::create_atomic(output)?;
     let out = BufWriter::with_capacity(WRITE_BUFFER, tmp.as_file().try_clone()?);
 
@@ -92,24 +99,40 @@ pub fn detect(archive: &Path) -> Result<Format> {
     })
 }
 
-pub fn unpack(archive: &Path, dest: Option<&Path>, progress: bool) -> Result<(PathBuf, Summary)> {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Display {
+    pub progress: bool,
+    pub verbose: bool,
+}
+
+pub fn unpack(
+    archive: &Path,
+    dest: Option<&Path>,
+    opts: &UnpackOptions,
+    display: Display,
+) -> Result<(PathBuf, Summary)> {
     let format = detect(archive)?;
-    let progress = Progress::new("unpacking", 0, progress);
+    let progress = Progress::new("unpacking", 0, display.progress, display.verbose);
     let result = match dest {
         Some(dest) => {
             fs::create_dir_all(dest)
                 .with_context(|| format!("cannot create {}", dest.display()))?;
-            extract(archive, dest, format, &progress).map(|s| (dest.to_path_buf(), s))
+            extract(archive, dest, format, opts, &progress).map(|s| (dest.to_path_buf(), s))
         }
-        None => unpack_here(archive, format, &progress),
+        None => unpack_here(archive, format, opts, &progress),
     };
     progress.finish();
     result
 }
 
-fn unpack_here(archive: &Path, format: Format, progress: &Progress) -> Result<(PathBuf, Summary)> {
+fn unpack_here(
+    archive: &Path,
+    format: Format,
+    opts: &UnpackOptions,
+    progress: &Progress,
+) -> Result<(PathBuf, Summary)> {
     let here = Path::new(".");
-    if format == Format::Zip {
+    if format == Format::Zip && opts.strip == 0 {
         let tops = ziparc::top_level(archive)?;
         let target = match tops.iter().next() {
             Some(only) if tops.len() == 1 => here.join(only),
@@ -127,7 +150,7 @@ fn unpack_here(archive: &Path, format: Format, progress: &Progress) -> Result<(P
         .tempdir_in(here)
         .context("cannot create a staging directory here")?;
     fsutil::track(staging.path());
-    let result = finish_staging(archive, &staging, format, progress);
+    let result = finish_staging(archive, &staging, format, opts, progress);
     fsutil::untrack(staging.path());
     result
 }
@@ -136,10 +159,11 @@ fn finish_staging(
     archive: &Path,
     staging: &tempfile::TempDir,
     format: Format,
+    opts: &UnpackOptions,
     progress: &Progress,
 ) -> Result<(PathBuf, Summary)> {
     let here = Path::new(".");
-    let summary = extract(archive, staging.path(), format, progress)?;
+    let summary = extract(archive, staging.path(), format, opts, progress)?;
 
     let mut top = fs::read_dir(staging.path())?.collect::<std::io::Result<Vec<_>>>()?;
     let (from, to, whole) = if top.len() == 1 {
@@ -163,10 +187,16 @@ fn finish_staging(
     Ok((to, summary))
 }
 
-fn extract(archive: &Path, dest: &Path, format: Format, progress: &Progress) -> Result<Summary> {
+fn extract(
+    archive: &Path,
+    dest: &Path,
+    format: Format,
+    opts: &UnpackOptions,
+    progress: &Progress,
+) -> Result<Summary> {
     match format {
-        Format::Zip => ziparc::unpack(archive, dest, progress),
-        format => tarball::unpack(archive, dest, format, progress),
+        Format::Zip => ziparc::unpack(archive, dest, opts, progress),
+        format => tarball::unpack(archive, dest, format, opts, progress),
     }
 }
 

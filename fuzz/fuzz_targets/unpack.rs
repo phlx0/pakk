@@ -4,6 +4,7 @@ use std::fs;
 
 use libfuzzer_sys::fuzz_target;
 use pakk::format::Format;
+use pakk::options::UnpackOptions;
 use pakk::progress::Progress;
 use pakk::{tarball, ziparc};
 
@@ -17,8 +18,10 @@ fuzz_target!(|data: &[u8]| {
     fs::write(&archive, data).unwrap();
     fs::create_dir(&dest).unwrap();
     let _ = match format {
-        Format::Zip => ziparc::unpack(&archive, &dest, &Progress::hidden()),
-        format => tarball::unpack(&archive, &dest, format, &Progress::hidden()),
+        Format::Zip => ziparc::unpack(&archive, &dest, &UnpackOptions::default(), &Progress::hidden()),
+        format => {
+            tarball::unpack(&archive, &dest, format, &UnpackOptions::default(), &Progress::hidden())
+        }
     };
     let mut siblings: Vec<_> = fs::read_dir(dir.path())
         .unwrap()

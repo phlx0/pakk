@@ -20,8 +20,12 @@ pub struct Cli {
     pub threads: Option<usize>,
 
     /// Suppress progress bars and summaries
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
+
+    /// Print every entry as it is processed
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,6 +85,19 @@ pub struct UnpackArgs {
     /// Extract into this directory instead of next to the archive's name
     #[arg(short = 'C', long = "dir", value_name = "DIR")]
     pub dest: Option<PathBuf>,
+
+    /// Drop this many leading path components from every entry
+    #[arg(
+        long = "strip-components",
+        visible_alias = "strip",
+        value_name = "N",
+        default_value_t = 0
+    )]
+    pub strip: usize,
+
+    /// Never overwrite existing files
+    #[arg(short, long)]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args)]

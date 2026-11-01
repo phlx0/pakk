@@ -15,6 +15,7 @@ use crate::chunked::ChunkedWriter;
 use crate::format::Format;
 use crate::fsutil;
 use crate::listing::Listing;
+use crate::options::UnpackOptions;
 use crate::pgzip;
 use crate::progress::{Progress, Summary};
 use crate::walk::{self, Entry, Kind};
@@ -160,6 +161,7 @@ fn write_tar<W: Write + Send + 'static>(
     for item in rx.iter().flatten() {
         match item {
             Loaded::Data(entry, meta, data) => {
+                progress.entry(&entry.name);
                 let mut header = Header::new_gnu();
                 header.set_metadata_in_mode(&meta, HeaderMode::Complete);
                 header.set_size(data.len() as u64);
@@ -170,6 +172,7 @@ fn write_tar<W: Write + Send + 'static>(
                 summary.bytes += data.len() as u64;
             }
             Loaded::Stream(entry) => {
+                progress.entry(&entry.name);
                 let context = || format!("cannot add {}", entry.path.display());
                 let file = fsutil::open_regular(&entry.path).with_context(context)?;
                 let meta = file.metadata().with_context(context)?;
@@ -181,6 +184,7 @@ fn write_tar<W: Write + Send + 'static>(
                 summary.bytes += meta.len();
             }
             Loaded::Path(entry) => {
+                progress.entry(&entry.name);
                 tar.append_path_with_name(&entry.path, &entry.name)
                     .with_context(|| format!("cannot add {}", entry.path.display()))?;
                 match entry.kind {
@@ -280,8 +284,19 @@ pub fn single_name(archive: &Path) -> String {
     format!("{name}.out")
 }
 
-fn unpack_single(archive: &Path, mut stream: Stream, dest: &Path) -> Result<Summary> {
-    let path = dest.join(single_name(archive));
+fn unpack_single(
+    archive: &Path,
+    mut stream: Stream,
+    dest: &Path,
+    opts: &UnpackOptions,
+    progress: &Progress,
+) -> Result<Summary> {
+    let name = single_name(archive);
+    let path = dest.join(&name);
+    if opts.skips(&path) {
+        return Ok(Summary::default());
+    }
+    progress.entry(&name);
     let out =
         fsutil::create_file(&path).with_context(|| format!("cannot create {}", path.display()))?;
     let bytes = io::copy(&mut stream, &mut BufWriter::with_capacity(1 << 20, out))
@@ -366,10 +381,16 @@ impl Links {
     }
 }
 
-pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) -> Result<Summary> {
+pub fn unpack(
+    archive: &Path,
+    dest: &Path,
+    format: Format,
+    opts: &UnpackOptions,
+    progress: &Progress,
+) -> Result<Summary> {
     let mut tar = match open(archive, format, progress)? {
         Opened::Tar(tar) => tar,
-        Opened::Single(stream) => return unpack_single(archive, stream, dest),
+        Opened::Single(stream) => return unpack_single(archive, stream, dest, opts, progress),
     };
     let workers = rayon::current_num_threads().max(2);
     let (tx, rx) = sync_channel::<Msg>(workers * 4);
@@ -399,7 +420,7 @@ pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) 
             barrier: &barrier,
             workers,
         };
-        read_entries(&mut tar, dest, &pool, &failure)
+        read_entries(&mut tar, dest, opts, &pool, &failure, progress)
     });
 
     if let Some(err) = failure.into_inner().expect("lock") {
@@ -407,7 +428,7 @@ pub fn unpack(archive: &Path, dest: &Path, format: Format, progress: &Progress) 
     }
     let (summary, dirs, links) = read?;
     for item in links.into_ordered() {
-        create_link(item)?;
+        create_link(item, opts)?;
     }
     for (dir, meta) in dirs.iter().rev() {
         restore(dir, meta)?;
@@ -420,8 +441,10 @@ type ReadResult = (Summary, Vec<(PathBuf, Meta)>, Links);
 fn read_entries<R: Read>(
     tar: &mut tar::Archive<R>,
     dest: &Path,
+    opts: &UnpackOptions,
     pool: &Pool<'_>,
     failure: &Mutex<Option<anyhow::Error>>,
+    progress: &Progress,
 ) -> Result<ReadResult> {
     let mut summary = Summary::default();
     let mut dirs = Vec::new();
@@ -436,10 +459,14 @@ fn read_entries<R: Read>(
         let mut entry = entry.context("corrupt archive")?;
         let raw = entry.path()?.into_owned();
         let rel = safe_path(&raw)?;
-        if rel.as_os_str().is_empty() || fsutil::is_macos_metadata(&rel) {
+        if fsutil::is_macos_metadata(&rel) {
             continue;
         }
+        let Some(rel) = opts.strip(&rel) else {
+            continue;
+        };
         let path = dest.join(&rel);
+        progress.entry(&rel.to_string_lossy());
         let header = entry.header();
         let meta = Meta {
             mode: header.mode().ok(),
@@ -460,6 +487,9 @@ fn read_entries<R: Read>(
             }
             EntryType::Link => {
                 let target = safe_path(&entry.link_name()?.unwrap_or_default())?;
+                let Some(target) = opts.strip(&target) else {
+                    continue;
+                };
                 beneath.create_parent(&target)?;
                 let target = dest.join(target);
                 beneath.create_parent(&rel)?;
@@ -469,6 +499,9 @@ fn read_entries<R: Read>(
             EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse => {
                 beneath.create_parent(&rel)?;
                 links.remove(&rel);
+                if opts.skips(&path) {
+                    continue;
+                }
                 if !written.insert(rel.clone()) && !pool.flush() {
                     break;
                 }
@@ -516,7 +549,11 @@ fn write_job(job: &Job) -> Result<()> {
     restore(&job.path, &job.meta)
 }
 
-fn create_link(item: Deferred) -> Result<()> {
+fn create_link(item: Deferred, opts: &UnpackOptions) -> Result<()> {
+    let (Deferred::Symlink(path, ..) | Deferred::HardLink(path, _)) = &item;
+    if opts.skips(path) {
+        return Ok(());
+    }
     match item {
         Deferred::Symlink(path, target, meta) => {
             if fs::symlink_metadata(&path).is_ok() {
@@ -633,7 +670,14 @@ mod tests {
 
         let dest = dir.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        let unpacked = unpack(&archive, &dest, format, &Progress::hidden()).unwrap();
+        let unpacked = unpack(
+            &archive,
+            &dest,
+            format,
+            &UnpackOptions::default(),
+            &Progress::hidden(),
+        )
+        .unwrap();
         assert_eq!(unpacked, packed);
 
         for rel in ["index.html", "assets/app.js"] {
@@ -716,7 +760,16 @@ mod tests {
 
         let dest = dir.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        assert!(unpack(&archive, &dest, Format::Tar, &Progress::hidden()).is_err());
+        assert!(
+            unpack(
+                &archive,
+                &dest,
+                Format::Tar,
+                &UnpackOptions::default(),
+                &Progress::hidden()
+            )
+            .is_err()
+        );
         assert!(!dir.path().join("escape.txt").exists());
     }
 }

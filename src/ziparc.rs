@@ -14,6 +14,7 @@ use zip::{CompressionMethod, PreparedZipFile, ZipArchive, ZipWriter};
 
 use crate::fsutil::{self, SharedFile};
 use crate::listing::Listing;
+use crate::options::UnpackOptions;
 use crate::progress::{Progress, Summary};
 use crate::walk::{self, Entry, Kind};
 
@@ -141,11 +142,13 @@ fn write_items<W: Write + Seek>(
     for item in rx.iter().flatten() {
         match item {
             Item::Prepared(file) => {
+                progress.entry(&String::from_utf8_lossy(file.file_name_raw()));
                 summary.files += 1;
                 summary.bytes += file.uncompressed_size();
                 zip.add_prepared_file(file)?;
             }
             Item::Stream(entry, options) => {
+                progress.entry(&entry.name);
                 zip.start_file(&entry.name, options)?;
                 let file = fsutil::open_regular(&entry.path)
                     .with_context(|| format!("cannot open {}", entry.path.display()))?;
@@ -154,10 +157,12 @@ fn write_items<W: Write + Seek>(
                     .with_context(|| format!("cannot read {}", entry.path.display()))?;
             }
             Item::Dir(name, options) => {
+                progress.entry(name);
                 summary.dirs += 1;
                 zip.add_directory(name, options)?;
             }
             Item::Symlink(name, target, options) => {
+                progress.entry(name);
                 summary.symlinks += 1;
                 zip.add_symlink(name, target, options)?;
             }
@@ -190,9 +195,14 @@ struct Plan {
     bytes: u64,
 }
 
-pub fn unpack(archive: &Path, dest: &Path, progress: &Progress) -> Result<Summary> {
+pub fn unpack(
+    archive: &Path,
+    dest: &Path,
+    opts: &UnpackOptions,
+    progress: &Progress,
+) -> Result<Summary> {
     let mut zip = open(archive)?;
-    let plan = plan(&mut zip)?;
+    let plan = plan(&mut zip, opts)?;
     progress.set_total(plan.bytes);
 
     let mut beneath = fsutil::Beneath::new(dest);
@@ -201,10 +211,13 @@ pub fn unpack(archive: &Path, dest: &Path, progress: &Progress) -> Result<Summar
     }
     plan.files.par_iter().try_for_each_init(
         || zip.clone(),
-        |zip, file| extract_file(zip, file, dest, progress),
+        |zip, file| extract_file(zip, file, dest, opts, progress),
     )?;
     for link in &plan.symlinks {
-        extract_symlink(&mut zip, link, dest)?;
+        if !opts.skips(&dest.join(&link.path)) {
+            progress.entry(&link.path.to_string_lossy());
+            extract_symlink(&mut zip, link, dest)?;
+        }
     }
     for dir in plan.dirs.iter().rev() {
         restore_metadata(&dest.join(&dir.path), dir)?;
@@ -264,7 +277,7 @@ fn open(archive: &Path) -> Result<ZipArchive<SharedFile>> {
         .with_context(|| format!("{} is not a valid zip archive", archive.display()))
 }
 
-fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
+fn plan(zip: &mut ZipArchive<SharedFile>, opts: &UnpackOptions) -> Result<Plan> {
     let mut plan = Plan::default();
     let mut leaves = Vec::new();
     let mut last = HashMap::new();
@@ -282,9 +295,12 @@ fn plan(zip: &mut ZipArchive<SharedFile>) -> Result<Plan> {
                 String::from_utf8_lossy(file.name_raw())
             )
         })?;
-        if path.as_os_str().is_empty() || fsutil::is_macos_metadata(&path) {
+        if fsutil::is_macos_metadata(&path) {
             continue;
         }
+        let Some(path) = opts.strip(&path) else {
+            continue;
+        };
         let planned = Planned {
             index,
             mode: file.unix_mode(),
@@ -319,9 +335,14 @@ fn extract_file(
     zip: &mut ZipArchive<SharedFile>,
     file: &Planned,
     dest: &Path,
+    opts: &UnpackOptions,
     progress: &Progress,
 ) -> Result<()> {
     let path = dest.join(&file.path);
+    if opts.skips(&path) {
+        return Ok(());
+    }
+    progress.entry(&file.path.to_string_lossy());
     let mut reader = zip.by_index(file.index)?;
     let out =
         fsutil::create_file(&path).with_context(|| format!("cannot create {}", path.display()))?;
@@ -433,7 +454,13 @@ mod tests {
 
         let dest = dir.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        let summary = unpack(&archive, &dest, &Progress::hidden()).unwrap();
+        let summary = unpack(
+            &archive,
+            &dest,
+            &UnpackOptions::default(),
+            &Progress::hidden(),
+        )
+        .unwrap();
         assert_eq!(summary.files, 4);
 
         for rel in ["text.txt", "photo.jpg", "nested/zero", "nested/noise.bin"] {
@@ -491,7 +518,13 @@ mod tests {
         fs::write(&archive, pack_to_vec(dir.path())).unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        unpack(&archive, &dest, &Progress::hidden()).unwrap();
+        unpack(
+            &archive,
+            &dest,
+            &UnpackOptions::default(),
+            &Progress::hidden(),
+        )
+        .unwrap();
         let restored = fs::metadata(dest.join("src/text.txt"))
             .unwrap()
             .modified()
@@ -511,7 +544,13 @@ mod tests {
 
         let dest = dir.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        let err = unpack(&archive, &dest, &Progress::hidden()).unwrap_err();
+        let err = unpack(
+            &archive,
+            &dest,
+            &UnpackOptions::default(),
+            &Progress::hidden(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unsafe path"), "{err}");
         assert!(!dir.path().join("escape.txt").exists());
     }

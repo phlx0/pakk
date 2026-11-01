@@ -5,13 +5,17 @@ use indicatif::{ProgressBar, ProgressBarIter, ProgressDrawTarget, ProgressStyle}
 #[derive(Debug, Clone)]
 pub struct Progress {
     bar: ProgressBar,
+    verbose: bool,
 }
 
 impl Progress {
     #[must_use]
-    pub fn new(verb: &str, total: u64, visible: bool) -> Self {
+    pub fn new(verb: &str, total: u64, visible: bool, verbose: bool) -> Self {
         if !visible {
-            return Self::hidden();
+            return Self {
+                verbose,
+                ..Self::hidden()
+            };
         }
         let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
         bar.set_style(
@@ -22,13 +26,25 @@ impl Progress {
             .progress_chars("━╸─"),
         );
         bar.set_prefix(verb.to_owned());
-        Self { bar }
+        Self { bar, verbose }
     }
 
     #[must_use]
     pub fn hidden() -> Self {
         Self {
             bar: ProgressBar::hidden(),
+            verbose: false,
+        }
+    }
+
+    pub fn entry(&self, name: &str) {
+        if !self.verbose {
+            return;
+        }
+        if self.bar.is_hidden() {
+            eprintln!("{name}");
+        } else {
+            self.bar.println(name);
         }
     }
 
