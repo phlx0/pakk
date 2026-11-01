@@ -46,6 +46,25 @@ fn run(cli: Cli) -> Result<()> {
         Command::Pack(args) => pack(&args, show, cli.verbose, cli.quiet),
         Command::Unpack(args) => unpack(&args, show, cli.verbose, cli.quiet),
         Command::List(args) => list(&args),
+        Command::Test { archive } => {
+            let started = Instant::now();
+            let summary = ops::verify(
+                &archive,
+                ops::Display {
+                    progress: show,
+                    verbose: cli.verbose,
+                },
+            )?;
+            if !cli.quiet {
+                report(
+                    "verified",
+                    &summary,
+                    &format!("in {}, all checksums match,", archive.display()),
+                    started,
+                );
+            }
+            Ok(())
+        }
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "pakk", &mut io::stdout());
             Ok(())

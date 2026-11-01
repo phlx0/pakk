@@ -254,6 +254,31 @@ pub fn list(archive: &Path) -> Result<Vec<Listing>> {
         .collect()
 }
 
+pub fn verify(archive: &Path, progress: &Progress) -> Result<Summary> {
+    let mut zip = open(archive)?;
+    let plan = plan(&mut zip, &UnpackOptions::default())?;
+    progress.set_total(plan.bytes);
+    plan.files
+        .par_iter()
+        .chain(&plan.symlinks)
+        .try_for_each_init(
+            || zip.clone(),
+            |zip, file| -> Result<()> {
+                let mut reader = zip.by_index(file.index)?;
+                progress.entry(&file.path.to_string_lossy());
+                io::copy(&mut reader, &mut progress.wrap_write(io::sink()))
+                    .with_context(|| format!("{} is corrupt", file.path.display()))?;
+                Ok(())
+            },
+        )?;
+    Ok(Summary {
+        files: plan.files.len() as u64,
+        dirs: plan.dirs.len() as u64,
+        symlinks: plan.symlinks.len() as u64,
+        bytes: plan.bytes,
+    })
+}
+
 pub fn top_level(archive: &Path) -> Result<BTreeSet<PathBuf>> {
     let zip = open(archive)?;
     let mut tops = BTreeSet::new();

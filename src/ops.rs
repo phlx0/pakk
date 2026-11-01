@@ -200,6 +200,17 @@ fn extract(
     }
 }
 
+pub fn verify(archive: &Path, display: Display) -> Result<Summary> {
+    let format = detect(archive)?;
+    let progress = Progress::new("testing", 0, display.progress, display.verbose);
+    let result = match format {
+        Format::Zip => ziparc::verify(archive, &progress),
+        format => tarball::verify(archive, format, &progress),
+    };
+    progress.finish();
+    result
+}
+
 pub fn list(archive: &Path) -> Result<Vec<Listing>> {
     match detect(archive)? {
         Format::Zip => ziparc::list(archive),

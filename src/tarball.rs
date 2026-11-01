@@ -597,6 +597,44 @@ fn restore(path: &Path, meta: &Meta) -> Result<()> {
     Ok(())
 }
 
+pub fn verify(archive: &Path, format: Format, progress: &Progress) -> Result<Summary> {
+    let mut tar = match open(archive, format, progress)? {
+        Opened::Tar(tar) => tar,
+        Opened::Single(mut stream) => {
+            let bytes = io::copy(&mut stream, &mut io::sink())
+                .with_context(|| format!("{} is corrupt", archive.display()))?;
+            return Ok(Summary {
+                files: 1,
+                bytes,
+                ..Summary::default()
+            });
+        }
+    };
+    let mut summary = Summary::default();
+    for entry in tar.entries().context("cannot read archive")? {
+        let mut entry = entry.context("corrupt archive")?;
+        let name = entry.path()?.to_string_lossy().into_owned();
+        progress.entry(&name);
+        match entry.header().entry_type() {
+            EntryType::Directory => summary.dirs += 1,
+            EntryType::Symlink | EntryType::Link => summary.symlinks += 1,
+            _ => {
+                summary.files += 1;
+                summary.bytes += io::copy(&mut entry, &mut io::sink())
+                    .with_context(|| format!("{name} is corrupt"))?;
+            }
+        }
+    }
+    drain(tar)?;
+    Ok(summary)
+}
+
+fn drain(tar: tar::Archive<Stream>) -> Result<()> {
+    io::copy(&mut tar.into_inner(), &mut io::sink())
+        .context("archive is corrupt after the last entry")?;
+    Ok(())
+}
+
 pub fn list(archive: &Path, format: Format) -> Result<Vec<Listing>> {
     let mut tar = match open(archive, format, &Progress::hidden())? {
         Opened::Tar(tar) => tar,

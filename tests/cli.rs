@@ -595,3 +595,37 @@ fn strips_components_keeps_existing_and_lists_verbosely() {
         .assert()
         .failure();
 }
+
+#[test]
+fn verifies_archives_and_detects_corruption() {
+    for format in ["zip", "tar.gz", "tar.zst", "tar.xz", "tar.bz2"] {
+        let ws = workspace();
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let noise: Vec<u8> = (0..200_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 40) as u8
+            })
+            .collect();
+        fs::write(ws.path().join("project/noise.bin"), noise).unwrap();
+        pakk(ws.path())
+            .args(["pack", "project", "-f", format, "-l", "1"])
+            .assert()
+            .success();
+        let archive = format!("project.{format}");
+        pakk(ws.path())
+            .args(["test", &archive])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("checksums match"));
+
+        let path = ws.path().join(&archive);
+        let mut bytes = fs::read(&path).unwrap();
+        let at = bytes.len() / 2;
+        bytes[at] ^= 0x55;
+        fs::write(&path, bytes).unwrap();
+        pakk(ws.path()).args(["test", &archive]).assert().failure();
+    }
+}

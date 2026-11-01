@@ -39,6 +39,12 @@ pub enum Command {
     /// List the contents of an archive
     #[command(visible_aliases = ["l", "ls"])]
     List(ListArgs),
+    /// Check an archive's integrity without extracting it
+    #[command(visible_alias = "t")]
+    Test {
+        /// Archive to verify
+        archive: PathBuf,
+    },
     /// Print shell completions
     Completions {
         #[arg(value_enum)]
