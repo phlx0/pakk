@@ -67,7 +67,7 @@ pub fn collect(inputs: &[PathBuf], exclude: Option<&Path>) -> Result<Collected> 
             let meta = item
                 .metadata()
                 .with_context(|| format!("cannot stat {}", item.path().display()))?;
-            let Some(entry) = make_entry(item.path(), archive_name(&name_path), &meta)? else {
+            let Some(entry) = make_entry(item.path(), archive_name(&name_path)?, &meta)? else {
                 skipped.push(item.path().to_path_buf());
                 continue;
             };
@@ -113,14 +113,17 @@ fn is_excluded(path: &Path, exclude: Option<&Path>) -> bool {
     })
 }
 
-fn archive_name(path: &Path) -> String {
-    path.components()
-        .filter_map(|c| match c {
-            Component::Normal(part) => Some(part.to_string_lossy()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+fn archive_name(path: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            let Some(part) = part.to_str() else {
+                bail!("cannot store non-UTF-8 file name {}", path.display());
+            };
+            parts.push(part);
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 fn make_entry(path: &Path, name: String, meta: &Metadata) -> Result<Option<Entry>> {
@@ -240,6 +243,17 @@ mod tests {
         assert_eq!(sizes(batches(&entries, 100, 3, u64::MAX)), [3, 3, 3, 1]);
         assert_eq!(sizes(batches(&entries, 100, 99, 10)), [10]);
         assert!(batches(&[], 100, 99, 10).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_non_utf8_names_instead_of_mangling_them() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tree();
+        let bad = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+        fs::write(dir.path().join("proj").join(bad), "x").unwrap();
+        let err = collect(&[dir.path().join("proj")], None).unwrap_err();
+        assert!(err.to_string().contains("non-UTF-8"), "{err}");
     }
 
     #[test]
