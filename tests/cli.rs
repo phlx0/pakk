@@ -130,6 +130,28 @@ fn refuses_to_clobber() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("already exists"));
+    let staging = fs::read_dir(ws.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pakk-")
+        })
+        .count();
+    assert_eq!(staging, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn explains_unnamable_input() {
+    let ws = workspace();
+    pakk(ws.path())
+        .args(["pack", "/"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot derive an archive name"));
 }
 
 #[test]

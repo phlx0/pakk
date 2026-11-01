@@ -108,6 +108,19 @@ pub fn unpack(archive: &Path, dest: Option<&Path>, progress: bool) -> Result<(Pa
 
 fn unpack_here(archive: &Path, format: Format, progress: &Progress) -> Result<(PathBuf, Summary)> {
     let here = Path::new(".");
+    if format == Format::Zip {
+        let tops = ziparc::top_level(archive)?;
+        let target = match tops.iter().next() {
+            Some(only) if tops.len() == 1 => here.join(only),
+            _ => here.join(Format::stem(archive).unwrap_or_else(|| "archive".into())),
+        };
+        if fs::symlink_metadata(&target).is_ok() {
+            bail!(
+                "{} already exists (pass -C <dir> to extract elsewhere)",
+                target.display()
+            );
+        }
+    }
     let staging = tempfile::Builder::new()
         .prefix(".pakk-")
         .tempdir_in(here)

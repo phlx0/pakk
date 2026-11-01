@@ -241,6 +241,22 @@ pub fn list(archive: &Path) -> Result<Vec<Listing>> {
         .collect()
 }
 
+pub fn top_level(archive: &Path) -> Result<BTreeSet<PathBuf>> {
+    let zip = open(archive)?;
+    let mut tops = BTreeSet::new();
+    for name in zip.file_names() {
+        let name = name?;
+        let path = Path::new(name.as_ref());
+        if fsutil::is_macos_metadata(path) {
+            continue;
+        }
+        if let Some(std::path::Component::Normal(first)) = path.components().next() {
+            tops.insert(PathBuf::from(first));
+        }
+    }
+    Ok(tops)
+}
+
 fn open(archive: &Path) -> Result<ZipArchive<SharedFile>> {
     let file =
         SharedFile::open(archive).with_context(|| format!("cannot open {}", archive.display()))?;
