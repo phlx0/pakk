@@ -427,6 +427,7 @@ pub fn unpack(
         return Err(err);
     }
     let (summary, dirs, links) = read?;
+    drain(tar)?;
     for item in links.into_ordered() {
         create_link(item, opts)?;
     }
@@ -778,6 +779,24 @@ mod tests {
         assert_eq!(single_name(Path::new("dir/app.log.gz")), "app.log");
         assert_eq!(single_name(Path::new("dump.SQL.ZST")), "dump.SQL");
         assert_eq!(single_name(Path::new("data.bin")), "data.bin.out");
+    }
+
+    #[test]
+    fn unpack_verifies_the_trailing_frame_checksum() {
+        let dir = fixture();
+        let collected = walk::collect(&[dir.path().join("site")], None, &walk::Filters::default());
+        let entries = collected.unwrap().entries;
+        let archive = dir.path().join("out.tar.zst");
+        let file = File::create(&archive).unwrap();
+        pack(&entries, file, Format::TarZst, 3, 1, &Progress::hidden()).unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&archive, bytes).unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let opts = UnpackOptions::default();
+        assert!(unpack(&archive, &dest, Format::TarZst, &opts, &Progress::hidden()).is_err());
     }
 
     #[test]
