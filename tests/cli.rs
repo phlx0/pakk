@@ -629,3 +629,30 @@ fn verifies_archives_and_detects_corruption() {
         pakk(ws.path()).args(["test", &archive]).assert().failure();
     }
 }
+
+#[test]
+fn streams_through_stdout_and_stdin() {
+    for format in ["tar.zst", "zip"] {
+        let ws = workspace();
+        let packed = pakk(ws.path())
+            .args(["-q", "pack", "project", "-f", format, "-o", "-"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert!(!packed.is_empty());
+        pakk(ws.path())
+            .args(["unpack", "-", "-C", "piped"])
+            .write_stdin(packed.clone())
+            .assert()
+            .success();
+        assert_same_tree(&ws.path().join("project"), &ws.path().join("piped/project"));
+        pakk(ws.path())
+            .args(["list", "-"])
+            .write_stdin(packed)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("project/src/main.rs"));
+    }
+}

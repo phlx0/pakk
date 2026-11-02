@@ -58,7 +58,7 @@ pub struct PackArgs {
     #[arg(required = true, value_name = "INPUT")]
     pub inputs: Vec<PathBuf>,
 
-    /// Archive to create; its extension picks the format
+    /// Archive to create, or `-` for stdout; its extension picks the format
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
@@ -85,7 +85,7 @@ pub struct PackArgs {
 
 #[derive(Debug, Args)]
 pub struct UnpackArgs {
-    /// Archive to extract (format is detected from its contents)
+    /// Archive to extract, or `-` for stdin (format is detected from its contents)
     pub archive: PathBuf,
 
     /// Extract into this directory instead of next to the archive's name

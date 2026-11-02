@@ -86,7 +86,11 @@ fn pack(args: &PackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<(
             gitignore: args.gitignore,
         },
     };
-    let ops::Packed { summary, skipped } = ops::pack(&args.inputs, &output, &opts)?;
+    let ops::Packed {
+        summary,
+        skipped,
+        size,
+    } = ops::pack(&args.inputs, &output, &opts)?;
     for path in &skipped {
         eprintln!(
             "{} skipped {} (not a regular file, directory or symlink)",
@@ -96,7 +100,6 @@ fn pack(args: &PackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<(
     }
 
     if !quiet {
-        let size = std::fs::metadata(&output).map_or(0, |m| m.len());
         let ratio = if summary.bytes > 0 {
             format!(", {:.0}%", size as f64 * 100.0 / summary.bytes as f64)
         } else {
@@ -105,11 +108,23 @@ fn pack(args: &PackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<(
         report(
             "packed",
             &summary,
-            &format!("into {} ({}{ratio})", output.display(), HumanBytes(size)),
+            &format!(
+                "into {} ({}{ratio})",
+                display_output(&output),
+                HumanBytes(size)
+            ),
             started,
         );
     }
     Ok(())
+}
+
+fn display_output(path: &Path) -> String {
+    if ops::is_stdio(path) {
+        "stdout".into()
+    } else {
+        path.display().to_string()
+    }
 }
 
 fn resolve_output(args: &PackArgs) -> Result<(PathBuf, Format)> {
