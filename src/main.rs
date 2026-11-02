@@ -46,15 +46,18 @@ fn run(cli: Cli) -> Result<()> {
         Command::Pack(args) => pack(&args, show, cli.verbose, cli.quiet),
         Command::Unpack(args) => unpack(&args, show, cli.verbose, cli.quiet),
         Command::List(args) => list(&args),
-        Command::Test { archive } => {
+        Command::Test(args) => {
             let started = Instant::now();
-            let summary = ops::verify(
-                &archive,
-                ops::Display {
-                    progress: show,
-                    verbose: cli.verbose,
-                },
-            )?;
+            let archive = args.archive;
+            let opts = UnpackOptions {
+                password: password(&archive, args.password)?,
+                ..UnpackOptions::default()
+            };
+            let display = ops::Display {
+                progress: show,
+                verbose: cli.verbose,
+            };
+            let summary = ops::verify(&archive, &opts, display)?;
             if !cli.quiet {
                 report(
                     "verified",
@@ -168,6 +171,7 @@ fn unpack(args: &UnpackArgs, progress: bool, verbose: bool, quiet: bool) -> Resu
     let opts = UnpackOptions {
         strip: args.strip,
         keep: args.keep,
+        password: password(&args.archive, args.password.clone())?,
     };
     let display = ops::Display { progress, verbose };
     let (dest, summary) = ops::unpack(&args.archive, args.dest.as_deref(), &opts, display)?;
@@ -180,6 +184,15 @@ fn unpack(args: &UnpackArgs, progress: bool, verbose: bool, quiet: bool) -> Resu
         );
     }
     Ok(())
+}
+
+fn password(archive: &Path, given: Option<String>) -> Result<Option<String>> {
+    if given.is_some() || !io::stdin().is_terminal() || !ops::needs_password(archive)? {
+        return Ok(given);
+    }
+    let entered = rpassword::prompt_password(format!("password for {}: ", archive.display()))
+        .context("cannot read password")?;
+    Ok(Some(entered))
 }
 
 fn display_dir(path: &Path) -> String {

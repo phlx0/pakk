@@ -41,10 +41,7 @@ pub enum Command {
     List(ListArgs),
     /// Check an archive's integrity without extracting it
     #[command(visible_alias = "t")]
-    Test {
-        /// Archive to verify
-        archive: PathBuf,
-    },
+    Test(TestArgs),
     /// Print shell completions
     Completions {
         #[arg(value_enum)]
@@ -104,6 +101,20 @@ pub struct UnpackArgs {
     /// Never overwrite existing files
     #[arg(short, long)]
     pub keep: bool,
+
+    /// Password for encrypted zip entries (prompted for when needed and omitted)
+    #[arg(short = 'P', long, env = "PAKK_PASSWORD", hide_env_values = true)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TestArgs {
+    /// Archive to verify, or `-` for stdin
+    pub archive: PathBuf,
+
+    /// Password for encrypted zip entries (prompted for when needed and omitted)
+    #[arg(short = 'P', long, env = "PAKK_PASSWORD", hide_env_values = true)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Args)]

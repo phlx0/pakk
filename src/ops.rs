@@ -321,13 +321,20 @@ fn extract(
     }
 }
 
-pub fn verify(archive: &Path, display: Display) -> Result<Summary> {
+pub fn needs_password(archive: &Path) -> Result<bool> {
+    if is_stdio(archive) || detect(archive)? != Format::Zip {
+        return Ok(false);
+    }
+    ziparc::is_encrypted(archive)
+}
+
+pub fn verify(archive: &Path, opts: &UnpackOptions, display: Display) -> Result<Summary> {
     let input = materialize(archive)?;
     let archive = input.path.as_path();
     let format = detect(archive)?;
     let progress = Progress::new("testing", 0, display.progress, display.verbose);
     let result = match format {
-        Format::Zip => ziparc::verify(archive, &progress),
+        Format::Zip => ziparc::verify(archive, opts, &progress),
         format => tarball::verify(archive, format, &progress),
     };
     progress.finish();

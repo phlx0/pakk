@@ -15,7 +15,7 @@ exclude = ["/.github", "/bench", "/fuzz"]
 [dependencies]
 anyhow = "1.0.104"
 bzip2 = "0.6"
-clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.6.11"
 console = "0.16"
 crc32fast = "1.5.4"
@@ -27,9 +27,10 @@ indicatif = "0.18.6"
 jiff = "0.2.38"
 lzma-rust2 = "0.23"
 rayon = "1.12.0"
+rpassword = "7.5.4"
 tar = "0.4.46"
 tempfile = "3.27.0"
-zip = { version = "9.2.2", default-features = false, features = ["bzip2", "deflate-flate2-zlib-rs", "deflate64", "jiff-02", "legacy-zip", "lzma", "ppmd", "xz", "zstd"] }
+zip = { version = "9.2.2", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "deflate64", "jiff-02", "legacy-zip", "lzma", "ppmd", "xz", "zstd"] }
 zstd = { version = "0.14.3", features = ["zstdmt"] }
 
 [dev-dependencies]

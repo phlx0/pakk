@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct UnpackOptions {
     pub strip: usize,
     pub keep: bool,
+    pub password: Option<String>,
 }
 
 impl UnpackOptions {
@@ -27,7 +28,7 @@ mod tests {
     fn strips_leading_components() {
         let opts = UnpackOptions {
             strip: 1,
-            keep: false,
+            ..UnpackOptions::default()
         };
         assert_eq!(
             opts.strip(Path::new("pkg/src/lib.rs")),

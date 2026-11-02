@@ -181,6 +181,7 @@ fn is_precompressed(name: &str) -> bool {
 
 struct Planned {
     index: usize,
+    encrypted: bool,
     path: PathBuf,
     mode: Option<u32>,
     mtime: Option<SystemTime>,
@@ -216,7 +217,7 @@ pub fn unpack(
     for link in &plan.symlinks {
         if !opts.skips(&dest.join(&link.path)) {
             progress.entry(&link.path.to_string_lossy());
-            extract_symlink(&mut zip, link, dest)?;
+            extract_symlink(&mut zip, link, dest, opts)?;
         }
     }
     for dir in plan.dirs.iter().rev() {
@@ -254,9 +255,9 @@ pub fn list(archive: &Path) -> Result<Vec<Listing>> {
         .collect()
 }
 
-pub fn verify(archive: &Path, progress: &Progress) -> Result<Summary> {
+pub fn verify(archive: &Path, opts: &UnpackOptions, progress: &Progress) -> Result<Summary> {
     let mut zip = open(archive)?;
-    let plan = plan(&mut zip, &UnpackOptions::default())?;
+    let plan = plan(&mut zip, opts)?;
     progress.set_total(plan.bytes);
     plan.files
         .par_iter()
@@ -277,6 +278,16 @@ pub fn verify(archive: &Path, progress: &Progress) -> Result<Summary> {
         symlinks: plan.symlinks.len() as u64,
         bytes: plan.bytes,
     })
+}
+
+pub fn is_encrypted(archive: &Path) -> Result<bool> {
+    let mut zip = open(archive)?;
+    for index in 0..zip.len() {
+        if zip.by_index_raw(index)?.encrypted() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn top_level(archive: &Path) -> Result<BTreeSet<PathBuf>> {
@@ -308,9 +319,9 @@ fn plan(zip: &mut ZipArchive<SharedFile>, opts: &UnpackOptions) -> Result<Plan> 
     let mut last = HashMap::new();
     for index in 0..zip.len() {
         let file = zip.by_index_raw(index)?;
-        if file.encrypted() {
+        if file.encrypted() && opts.password.is_none() {
             bail!(
-                "`{}` is encrypted, which pakk does not support",
+                "`{}` is encrypted (pass --password or set PAKK_PASSWORD)",
                 file.name()?
             );
         }
@@ -328,6 +339,7 @@ fn plan(zip: &mut ZipArchive<SharedFile>, opts: &UnpackOptions) -> Result<Plan> 
         };
         let planned = Planned {
             index,
+            encrypted: file.encrypted(),
             mode: file.unix_mode(),
             mtime: modified(&file),
             path,
@@ -368,7 +380,7 @@ fn extract_file(
         return Ok(());
     }
     progress.entry(&file.path.to_string_lossy());
-    let mut reader = zip.by_index(file.index)?;
+    let mut reader = open_entry(zip, file, opts)?;
     let out =
         fsutil::create_file(&path).with_context(|| format!("cannot create {}", path.display()))?;
     let mut writer = BufWriter::with_capacity(256 << 10, progress.wrap_write(out));
@@ -379,8 +391,25 @@ fn extract_file(
     restore_metadata(&path, file)
 }
 
-fn extract_symlink(zip: &mut ZipArchive<SharedFile>, link: &Planned, dest: &Path) -> Result<()> {
-    let target = io::read_to_string(zip.by_index(link.index)?)?;
+fn open_entry<'a>(
+    zip: &'a mut ZipArchive<SharedFile>,
+    file: &Planned,
+    opts: &UnpackOptions,
+) -> Result<zip::read::ZipFile<'a, SharedFile>> {
+    let entry = match (&opts.password, file.encrypted) {
+        (Some(password), true) => zip.by_index_decrypt(file.index, password.as_bytes()),
+        _ => zip.by_index(file.index),
+    };
+    entry.with_context(|| format!("cannot read {}", file.path.display()))
+}
+
+fn extract_symlink(
+    zip: &mut ZipArchive<SharedFile>,
+    link: &Planned,
+    dest: &Path,
+    opts: &UnpackOptions,
+) -> Result<()> {
+    let target = io::read_to_string(open_entry(zip, link, opts)?)?;
     let path = dest.join(&link.path);
     if fs::symlink_metadata(&path).is_ok() {
         fs::remove_file(&path).with_context(|| format!("cannot replace {}", path.display()))?;
@@ -555,6 +584,32 @@ mod tests {
             .modified()
             .unwrap();
         assert_eq!(restored, mtime);
+    }
+
+    #[test]
+    fn extracts_aes_encrypted_entries_with_the_right_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("secret.zip");
+        let mut zip = ZipWriter::new(File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .with_aes_encryption(zip::AesMode::Aes256, "hunter2");
+        zip.start_file("secret.txt", options).unwrap();
+        zip.write_all(b"top secret").unwrap();
+        zip.finish().unwrap();
+        assert!(is_encrypted(&archive).unwrap());
+
+        let attempt = |password: Option<&str>| {
+            let dest = tempfile::tempdir_in(dir.path()).unwrap();
+            let opts = UnpackOptions {
+                password: password.map(Into::into),
+                ..UnpackOptions::default()
+            };
+            unpack(&archive, dest.path(), &opts, &Progress::hidden())
+                .map(|_| fs::read_to_string(dest.path().join("secret.txt")).unwrap())
+        };
+        assert!(attempt(None).unwrap_err().to_string().contains("encrypted"));
+        assert!(attempt(Some("wrong")).is_err());
+        assert_eq!(attempt(Some("hunter2")).unwrap(), "top secret");
     }
 
     #[test]
