@@ -42,10 +42,10 @@ pub enum Command {
     /// Check an archive's integrity without extracting it
     #[command(visible_alias = "t")]
     Test(TestArgs),
-    /// Print shell completions
+    /// Print shell completions (for the current shell unless one is named)
     Completions {
         #[arg(value_enum)]
-        shell: Shell,
+        shell: Option<Shell>,
     },
     /// Print the man page
     #[command(hide = true)]

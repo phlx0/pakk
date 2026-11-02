@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 use console::style;
 use indicatif::{HumanBytes, HumanCount};
 use pakk::format::Format;
@@ -73,6 +74,9 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Completions { shell } => {
+            let shell = shell.or_else(Shell::from_env).context(
+                "cannot detect your shell; name it: pakk completions <bash|zsh|fish|elvish|powershell>",
+            )?;
             clap_complete::generate(shell, &mut Cli::command(), "pakk", &mut io::stdout());
             Ok(())
         }

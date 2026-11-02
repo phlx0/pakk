@@ -227,6 +227,18 @@ fn prints_completions() {
         .success()
         .stdout(predicate::str::contains("#compdef pakk"));
     pakk(ws.path())
+        .arg("completions")
+        .env("SHELL", "/usr/bin/fish")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -c pakk"));
+    pakk(ws.path())
+        .arg("completions")
+        .env("SHELL", "/bin/unknown-shell")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot detect your shell"));
+    pakk(ws.path())
         .arg("manpage")
         .assert()
         .success()

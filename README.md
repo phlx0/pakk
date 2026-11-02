@@ -103,7 +103,8 @@ curl -sL https://example.com/release.tar.gz | pakk unpack -
 Short aliases: `p`/`c` for pack, `x`/`u` for unpack, `l`/`ls` for list, `t` for test.
 `-j N` limits threads, `-v` prints every entry, `-q` silences output, `-k` never overwrites existing
 files and `--xattrs` stores and restores extended attributes in tar archives.
-Shell completions: `pakk completions zsh > ~/.zfunc/_pakk` (also bash, fish, elvish, powershell).
+Shell completions: `pakk completions > ~/.zfunc/_pakk` detects your shell from `$SHELL`, or name it
+(`bash`, `zsh`, `fish`, `elvish`, `powershell`).
 
 ## What makes it fast
 
