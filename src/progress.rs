@@ -41,6 +41,8 @@ impl Progress {
         if !self.verbose {
             return;
         }
+        #[cfg(windows)]
+        let name = &name.replace('\\', "/");
         if self.bar.is_hidden() {
             eprintln!("{name}");
         } else {
