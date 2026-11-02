@@ -18,8 +18,8 @@ pub struct PackOptions {
     pub format: Format,
     pub level: Option<u32>,
     pub force: bool,
-    pub progress: bool,
-    pub verbose: bool,
+    pub xattrs: bool,
+    pub display: Display,
     pub filters: walk::Filters,
 }
 
@@ -45,6 +45,9 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Pac
             levels.start(),
             levels.end()
         );
+    }
+    if opts.xattrs && opts.format == Format::Zip {
+        bail!("--xattrs is only supported for tar formats");
     }
     let to_stdout = is_stdio(output);
     if to_stdout && io::stdout().is_terminal() {
@@ -72,16 +75,16 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Pac
     let progress = Progress::new(
         "packing",
         walk::total_size(&entries),
-        opts.progress,
-        opts.verbose,
+        opts.display.progress,
+        opts.display.verbose,
     );
 
     let (summary, size) = if to_stdout {
-        pack_to_stdout(&entries, opts.format, level, &progress)?
+        pack_to_stdout(&entries, opts, level, &progress)?
     } else {
         let tmp = fsutil::create_atomic(output)?;
         let out = BufWriter::with_capacity(WRITE_BUFFER, tmp.as_file().try_clone()?);
-        let (out, summary) = pack_into(&entries, out, opts.format, level, &progress)?;
+        let (out, summary) = pack_into(&entries, out, opts, level, &progress)?;
         let file =
             finish_file(out).with_context(|| format!("cannot write {}", output.display()))?;
         let size = file.metadata()?.len();
@@ -99,29 +102,29 @@ pub fn pack(inputs: &[PathBuf], output: &Path, opts: &PackOptions) -> Result<Pac
 fn pack_into(
     entries: &[walk::Entry],
     out: BufWriter<File>,
-    format: Format,
+    opts: &PackOptions,
     level: u32,
     progress: &Progress,
 ) -> Result<(BufWriter<File>, Summary)> {
-    match format {
+    match opts.format {
         Format::Zip => ziparc::pack(entries, out, level, progress),
         format => {
             let threads = rayon::current_num_threads();
-            tarball::pack(entries, out, format, level, threads, progress)
+            tarball::pack(entries, out, format, level, threads, opts.xattrs, progress)
         }
     }
 }
 
 fn pack_to_stdout(
     entries: &[walk::Entry],
-    format: Format,
+    opts: &PackOptions,
     level: u32,
     progress: &Progress,
 ) -> Result<(Summary, u64)> {
     let mut stdout = io::stdout();
-    if format == Format::Zip {
+    if opts.format == Format::Zip {
         let out = BufWriter::with_capacity(WRITE_BUFFER, tempfile::tempfile()?);
-        let (out, summary) = pack_into(entries, out, format, level, progress)?;
+        let (out, summary) = pack_into(entries, out, opts, level, progress)?;
         let mut file = finish_file(out)?;
         file.seek(SeekFrom::Start(0))?;
         let size = io::copy(&mut file, &mut stdout)?;
@@ -130,7 +133,15 @@ fn pack_to_stdout(
     }
     let counter = Counter::new(BufWriter::with_capacity(WRITE_BUFFER, stdout));
     let threads = rayon::current_num_threads();
-    let (mut counter, summary) = tarball::pack(entries, counter, format, level, threads, progress)?;
+    let (mut counter, summary) = tarball::pack(
+        entries,
+        counter,
+        opts.format,
+        level,
+        threads,
+        opts.xattrs,
+        progress,
+    )?;
     counter.flush()?;
     Ok((summary, counter.count))
 }

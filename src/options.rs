@@ -5,6 +5,7 @@ pub struct UnpackOptions {
     pub strip: usize,
     pub keep: bool,
     pub password: Option<String>,
+    pub xattrs: bool,
 }
 
 impl UnpackOptions {

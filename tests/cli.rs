@@ -656,3 +656,39 @@ fn streams_through_stdout_and_stdin() {
             .stdout(predicate::str::contains("project/src/main.rs"));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn roundtrips_extended_attributes_on_request() {
+    let ws = workspace();
+    let file = ws.path().join("project/README.md");
+    if xattr::set(&file, "user.pakk.test", b"hello").is_err() {
+        return;
+    }
+    pakk(ws.path())
+        .args(["pack", "project", "-o", "a.tar.zst", "--xattrs"])
+        .assert()
+        .success();
+    pakk(ws.path())
+        .args(["unpack", "a.tar.zst", "-C", "with", "--xattrs"])
+        .assert()
+        .success();
+    pakk(ws.path())
+        .args(["unpack", "a.tar.zst", "-C", "without"])
+        .assert()
+        .success();
+    let read = |dir: &str| {
+        xattr::get(
+            ws.path().join(dir).join("project/README.md"),
+            "user.pakk.test",
+        )
+        .unwrap()
+    };
+    assert_eq!(read("with").as_deref(), Some(&b"hello"[..]));
+    assert_eq!(read("without"), None);
+    pakk(ws.path())
+        .args(["pack", "project", "-o", "a.zip", "--xattrs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only supported for tar"));
+}

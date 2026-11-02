@@ -19,6 +19,7 @@ use crate::options::UnpackOptions;
 use crate::pgzip;
 use crate::progress::{Progress, Summary};
 use crate::walk::{self, Entry, Kind};
+use crate::xattrs::{self, Attrs};
 
 const INLINE_LIMIT: u64 = 8 << 20;
 const XZ_MEM_LIMIT_KIB: u32 = 512 * 1024;
@@ -109,12 +110,13 @@ pub fn pack<W: Write + Send + 'static>(
     format: Format,
     level: u32,
     threads: usize,
+    xattrs: bool,
     progress: &Progress,
 ) -> Result<(W, Summary)> {
     let encoder = Encoder::new(out, format, level, threads)?;
     let (tx, rx) = sync_channel(1);
     thread::scope(|s| {
-        let writer = s.spawn(move || write_tar(encoder, &rx, progress));
+        let writer = s.spawn(move || write_tar(encoder, &rx, xattrs, progress));
         let loaded = prefetch(entries, &tx);
         drop(tx);
         let written = writer.join().map_err(|_| anyhow!("tar writer panicked"))?;
@@ -151,6 +153,7 @@ fn load(entry: &Entry) -> Result<Loaded<'_>> {
 fn write_tar<W: Write + Send + 'static>(
     encoder: Encoder<W>,
     rx: &Receiver<Vec<Loaded<'_>>>,
+    xattrs: bool,
     progress: &Progress,
 ) -> Result<(W, Summary)> {
     let mut tar = tar::Builder::new(encoder);
@@ -159,6 +162,14 @@ fn write_tar<W: Write + Send + 'static>(
 
     let mut summary = Summary::default();
     for item in rx.iter().flatten() {
+        let (Loaded::Data(entry, ..) | Loaded::Stream(entry) | Loaded::Path(entry)) = &item;
+        if xattrs && !matches!(entry.kind, Kind::Symlink { .. }) {
+            let attrs = xattrs::read(&entry.path)
+                .with_context(|| format!("cannot read attributes of {}", entry.path.display()))?;
+            if !attrs.is_empty() {
+                tar.append_pax_extensions(attrs.iter().map(|(k, v)| (k.as_str(), v.as_slice())))?;
+            }
+        }
         match item {
             Loaded::Data(entry, meta, data) => {
                 progress.entry(&entry.name);
@@ -312,6 +323,7 @@ struct Job {
     path: PathBuf,
     data: Vec<u8>,
     meta: Meta,
+    attrs: Attrs,
 }
 
 #[derive(Clone, Copy)]
@@ -431,13 +443,14 @@ pub fn unpack(
     for item in links.into_ordered() {
         create_link(item, opts)?;
     }
-    for (dir, meta) in dirs.iter().rev() {
+    for (dir, meta, attrs) in dirs.iter().rev() {
+        xattrs::apply(dir, attrs);
         restore(dir, meta)?;
     }
     Ok(summary)
 }
 
-type ReadResult = (Summary, Vec<(PathBuf, Meta)>, Links);
+type ReadResult = (Summary, Vec<(PathBuf, Meta, Attrs)>, Links);
 
 fn read_entries<R: Read>(
     tar: &mut tar::Archive<R>,
@@ -468,6 +481,11 @@ fn read_entries<R: Read>(
         };
         let path = dest.join(&rel);
         progress.entry(&rel.to_string_lossy());
+        let attrs = if opts.xattrs {
+            xattrs::from_entry(&mut entry).context("corrupt extended attributes")?
+        } else {
+            Attrs::new()
+        };
         let header = entry.header();
         let meta = Meta {
             mode: header.mode().ok(),
@@ -477,7 +495,7 @@ fn read_entries<R: Read>(
         match header.entry_type() {
             EntryType::Directory => {
                 beneath.create_dirs(&rel)?;
-                dirs.push((path, meta));
+                dirs.push((path, meta, attrs));
                 summary.dirs += 1;
             }
             EntryType::Symlink => {
@@ -514,11 +532,17 @@ fn read_entries<R: Read>(
                         .with_context(|| format!("cannot create {}", path.display()))?;
                     io::copy(&mut entry, &mut BufWriter::with_capacity(1 << 20, out))
                         .with_context(|| format!("cannot extract {}", rel.display()))?;
+                    xattrs::apply(&path, &attrs);
                     restore(&path, &meta)?;
                 } else {
                     let mut data = Vec::with_capacity(size as usize);
                     entry.read_to_end(&mut data).context("corrupt archive")?;
-                    if !pool.write(Job { path, data, meta }) {
+                    if !pool.write(Job {
+                        path,
+                        data,
+                        meta,
+                        attrs,
+                    }) {
                         break;
                     }
                 }
@@ -547,6 +571,7 @@ fn write_job(job: &Job) -> Result<()> {
     out.write_all(&job.data)
         .with_context(|| format!("cannot write {}", job.path.display()))?;
     drop(out);
+    xattrs::apply(&job.path, &job.attrs);
     restore(&job.path, &job.meta)
 }
 
@@ -703,7 +728,8 @@ mod tests {
             .entries;
         let archive = dir.path().join(format!("out.{format}"));
         let file = File::create(&archive).unwrap();
-        let (_, packed) = pack(&entries, file, format, level, 4, &Progress::hidden()).unwrap();
+        let (_, packed) =
+            pack(&entries, file, format, level, 4, false, &Progress::hidden()).unwrap();
         assert_eq!(packed.files, 2);
         assert_eq!(packed.dirs, 3);
 
@@ -788,7 +814,16 @@ mod tests {
         let entries = collected.unwrap().entries;
         let archive = dir.path().join("out.tar.zst");
         let file = File::create(&archive).unwrap();
-        pack(&entries, file, Format::TarZst, 3, 1, &Progress::hidden()).unwrap();
+        pack(
+            &entries,
+            file,
+            Format::TarZst,
+            3,
+            1,
+            false,
+            &Progress::hidden(),
+        )
+        .unwrap();
         let mut bytes = fs::read(&archive).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;

@@ -82,8 +82,8 @@ fn pack(args: &PackArgs, progress: bool, verbose: bool, quiet: bool) -> Result<(
         format,
         level: args.level,
         force: args.force,
-        progress,
-        verbose,
+        display: ops::Display { progress, verbose },
+        xattrs: args.xattrs,
         filters: pakk::walk::Filters {
             exclude: args.exclude.clone(),
             gitignore: args.gitignore,
@@ -172,6 +172,7 @@ fn unpack(args: &UnpackArgs, progress: bool, verbose: bool, quiet: bool) -> Resu
         strip: args.strip,
         keep: args.keep,
         password: password(&args.archive, args.password.clone())?,
+        xattrs: args.xattrs,
     };
     let display = ops::Display { progress, verbose };
     let (dest, summary) = ops::unpack(&args.archive, args.dest.as_deref(), &opts, display)?;

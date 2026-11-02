@@ -8,4 +8,5 @@ pub mod pgzip;
 pub mod progress;
 pub mod tarball;
 pub mod walk;
+pub mod xattrs;
 pub mod ziparc;

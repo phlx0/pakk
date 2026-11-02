@@ -800,6 +800,7 @@ dependencies = [
  "rpassword",
  "tar",
  "tempfile",
+ "xattr",
  "zip",
  "zstd",
 ]

@@ -78,6 +78,10 @@ pub struct PackArgs {
     /// Leave out files ignored by .gitignore, .ignore and .git/info/exclude
     #[arg(short, long)]
     pub gitignore: bool,
+
+    /// Store extended attributes (tar formats only)
+    #[arg(long)]
+    pub xattrs: bool,
 }
 
 #[derive(Debug, Args)]
@@ -105,6 +109,10 @@ pub struct UnpackArgs {
     /// Password for encrypted zip entries (prompted for when needed and omitted)
     #[arg(short = 'P', long, env = "PAKK_PASSWORD", hide_env_values = true)]
     pub password: Option<String>,
+
+    /// Restore extended attributes stored in tar archives
+    #[arg(long)]
+    pub xattrs: bool,
 }
 
 #[derive(Debug, Args)]
