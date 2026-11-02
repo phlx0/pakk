@@ -47,6 +47,9 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Print the man page
+    #[command(hide = true)]
+    Manpage,
 }
 
 #[derive(Debug, Args)]

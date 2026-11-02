@@ -226,6 +226,11 @@ fn prints_completions() {
         .assert()
         .success()
         .stdout(predicate::str::contains("#compdef pakk"));
+    pakk(ws.path())
+        .arg("manpage")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".TH pakk"));
 }
 
 #[test]

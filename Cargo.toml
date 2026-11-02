@@ -17,6 +17,7 @@ anyhow = "1.0.104"
 bzip2 = "0.6"
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.6.11"
+clap_mangen = "0.3.3"
 console = "0.16"
 crc32fast = "1.5.4"
 ctrlc = { version = "3.5.2", features = ["termination"] }

@@ -68,6 +68,10 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Manpage => {
+            clap_mangen::Man::new(Cli::command()).render(&mut io::stdout())?;
+            Ok(())
+        }
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "pakk", &mut io::stdout());
             Ok(())
