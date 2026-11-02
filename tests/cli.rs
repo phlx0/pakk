@@ -658,7 +658,7 @@ fn streams_through_stdout_and_stdin() {
             .get_output()
             .stdout
             .clone();
-        assert!(!packed.is_empty());
+        assert_ne!(packed, Vec::<u8>::new());
         pakk(ws.path())
             .args(["unpack", "-", "-C", "piped"])
             .write_stdin(packed.clone())
