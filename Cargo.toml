@@ -26,7 +26,7 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 ignore = "0.4.34"
 indicatif = "0.18.6"
 jiff = "0.2.38"
-lzma-rust2 = "0.23"
+lzma-rust2 = "0.25"
 rayon = "1.12.0"
 rpassword = "7.5.4"
 tar = "0.4.46"
